@@ -1,13 +1,23 @@
 // src/app.js — API Express del CRM Mayoreo de Princessitas Ceremonias.
 // Un solo servicio: /api/* + frontend React (build servido desde server.js).
 // Zona horaria de referencia: America/Mexico_City.
-// Sin login en esta versión: la usan todos los colaboradores por el enlace.
-// (Un PIN de acceso se puede agregar después; ver RUNBOOK.md.)
+// Segmentación por sucursal a nivel de dispositivo: cada colaboradora elige
+// su sucursal al abrir la app (se guarda en el dispositivo) y solo ve los
+// clientes de esa sucursal; el modo administrador ("Ver todas") se desbloquea
+// con el MISMO PIN de la app de asistencia (tabla settings, clave
+// admin_pin_hash, hash bcrypt, en la misma base Neon compartida; el PIN se
+// crea y se cambia en la app de asistencia, no aquí). Esto NO son cuentas de
+// usuario con contraseña: quien conozca el PIN o cambie la sucursal en su
+// dispositivo puede ver otra sucursal. Los clientes con sucursal 'Otra' solo
+// se ven en modo administrador.
 const express = require('express');
+const bcrypt = require('bcrypt');
 
 const TZ = 'America/Mexico_City';
 
 const BRANCHES = ['Medrano 58', 'Medrano 60', 'Zapotlanejo', 'Otra'];
+// Sucursales con vista propia (una colaboradora elige una de estas).
+const REAL_BRANCHES = ['Medrano 58', 'Medrano 60', 'Zapotlanejo'];
 const CARRIERS = ['Paquetexpress', 'Coordinadora', 'Estafeta', 'FedEx', 'Skydropx', 'Otra'];
 const STATUSES = ['nuevo', 'activo', 'inactivo'];
 const CHANNELS = ['WhatsApp', 'llamada', 'otro'];
@@ -68,6 +78,8 @@ function createApp(pool) {
   // ---- Normalizadores de filas ----
   const normClient = (r) => ({
     ...r,
+    // Paquetería a mostrar: si es 'Otra', el nombre libre que se escribió.
+    carrier_display: r.carrier === 'Otra' && r.carrier_other ? r.carrier_other : r.carrier,
     total_purchased: money(r.total_purchased),
     last_purchase_amount: r.last_purchase_amount == null ? null : money(r.last_purchase_amount),
     last_purchase_date: toISODate(r.last_purchase_date),
@@ -96,29 +108,110 @@ function createApp(pool) {
     return id;
   }
 
+  // ---- PIN de administración (reutilizado de la app de asistencia) ----
+  // La tabla settings vive en la misma base Neon compartida; la app de
+  // asistencia guarda ahí 'admin_pin_hash' (bcrypt). Si la tabla no existe
+  // (base nueva sin asistencia), no hay PIN configurado.
+  async function getPinHash() {
+    try {
+      const r = await pool.query("SELECT value FROM settings WHERE key = 'admin_pin_hash'");
+      return r.rows[0] ? r.rows[0].value : null;
+    } catch (err) {
+      if (/does not exist|no existe/i.test(err.message)) return null;
+      throw err;
+    }
+  }
+
+  // Resuelve el alcance de la petición:
+  // - Encabezado x-admin-pin con el PIN correcto -> { admin: true } (ve todo).
+  // - Encabezado x-branch con una sucursal real -> { branch } (ve solo esa).
+  // - Sin ninguno de los dos -> null (la ruta responde 400).
+  // El PIN incorrecto responde 401 directamente.
+  async function resolveScope(req, res) {
+    const pin = req.headers['x-admin-pin'];
+    if (pin) {
+      const hash = await getPinHash();
+      if (!hash) {
+        res.status(401).json({ ok: false, error: 'PIN de administración no configurado todavía. Se crea en la app de asistencia.' });
+        return undefined;
+      }
+      const ok = await bcrypt.compare(String(pin), hash);
+      if (!ok) {
+        res.status(401).json({ ok: false, error: 'PIN incorrecto.' });
+        return undefined;
+      }
+      return { admin: true };
+    }
+    const branch = req.headers['x-branch'];
+    if (branch && REAL_BRANCHES.includes(branch)) return { branch };
+    return null;
+  }
+
+  // ¿Puede este alcance ver/editar un cliente de esta sucursal?
+  // 'Otra' solo la ve el administrador.
+  function scopeAllows(scope, clientBranch) {
+    if (!scope) return false;
+    if (scope.admin) return true;
+    return clientBranch === scope.branch;
+  }
+
   // ================= Salud =================
   app.get('/api/health', (req, res) => res.json({ ok: true }));
 
+  // ================= PIN de administración =================
+  // POST /api/admin/verify-pin { pin } -> { ok, pinSet, verified }.
+  // Mismo comportamiento que la app de asistencia: siempre HTTP 200 con
+  // ok:true; pinSet indica si ya existe un PIN y verified si el enviado
+  // coincide. Sin PIN (o con pin vacío) no verifica nada.
+  app.post('/api/admin/verify-pin', async (req, res, next) => {
+    try {
+      const pin = String((req.body && req.body.pin) || '');
+      const hash = await getPinHash();
+      if (!hash) return res.json({ ok: true, pinSet: false, verified: false });
+      if (!pin) return res.json({ ok: true, pinSet: true, verified: false });
+      const verified = await bcrypt.compare(pin, hash);
+      return res.json({ ok: true, pinSet: true, verified });
+    } catch (err) { next(err); }
+  });
+
   // ================= Clientes =================
   // GET /api/clients?search=&branch=&carrier=&status=
-  // search: por nombre o teléfono. Filtros exactos por sucursal, paquetería y estado.
+  // search: por nombre, teléfono o ciudad. Filtros exactos por sucursal,
+  // paquetería y estado. Alcance obligatorio (encabezado x-branch con la
+  // sucursal, o x-admin-pin para el administrador): sin alcance -> 400.
+  // Sin ser administrador, la lista siempre es la de la sucursal propia
+  // (el parámetro branch se ignora); el administrador puede filtrar por
+  // cualquier sucursal, incluida 'Otra'.
   app.get('/api/clients', async (req, res, next) => {
     try {
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const conditions = [];
       const vals = [];
       let i = 1;
       const search = String(req.query.search || '').trim();
       if (search) {
-        conditions.push(`(LOWER(name) LIKE LOWER($${i}) OR LOWER(phone) LIKE LOWER($${i + 1}))`);
-        vals.push(`%${search}%`, `%${search}%`);
-        i += 2;
+        conditions.push(`(LOWER(name) LIKE LOWER($${i}) OR LOWER(phone) LIKE LOWER($${i + 1}) OR LOWER(city) LIKE LOWER($${i + 2}))`);
+        vals.push(`%${search}%`, `%${search}%`, `%${search}%`);
+        i += 3;
       }
-      if (req.query.branch) {
-        if (!BRANCHES.includes(req.query.branch)) {
-          return res.status(400).json({ ok: false, error: 'Sucursal no válida.' });
+      let branchFilter = null;
+      if (scope.admin) {
+        if (req.query.branch) {
+          if (!BRANCHES.includes(req.query.branch)) {
+            return res.status(400).json({ ok: false, error: 'Sucursal no válida.' });
+          }
+          branchFilter = req.query.branch;
         }
+      } else {
+        branchFilter = scope.branch;
+      }
+      if (branchFilter) {
         conditions.push(`branch = $${i}`);
-        vals.push(req.query.branch);
+        vals.push(branchFilter);
         i += 1;
       }
       if (req.query.carrier) {
@@ -160,6 +253,14 @@ function createApp(pool) {
       if (!BRANCHES.includes(branch)) return res.status(400).json({ ok: false, error: 'Sucursal no válida.' });
       if (!CARRIERS.includes(carrier)) return res.status(400).json({ ok: false, error: 'Paquetería no válida.' });
       if (!STATUSES.includes(status)) return res.status(400).json({ ok: false, error: 'Estado no válido.' });
+      // Paquetería 'Otra' exige escribir cuál es; con cualquier otra se
+      // ignora (queda en NULL).
+      let carrierOther = null;
+      if (carrier === 'Otra') {
+        carrierOther = String(b.carrier_other || '').trim();
+        if (!carrierOther) return res.status(400).json({ ok: false, error: 'Escribe qué paquetería es (elegiste "Otra").' });
+      }
+      const city = String(b.city || '').trim() || null;
       let nextFollowup = null;
       if (b.next_followup_date) {
         if (!isValidDateStr(b.next_followup_date)) {
@@ -168,21 +269,28 @@ function createApp(pool) {
         nextFollowup = b.next_followup_date;
       }
       const r = await pool.query(
-        `INSERT INTO crm_clients (name, phone, branch, carrier, status, next_followup_date, notes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [name, phone, branch, carrier, status, nextFollowup, b.notes || null]
+        `INSERT INTO crm_clients (name, phone, branch, carrier, carrier_other, city, status, next_followup_date, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        [name, phone, branch, carrier, carrierOther, city, status, nextFollowup, b.notes || null]
       );
       return res.status(201).json({ ok: true, client: normClient(r.rows[0]) });
     } catch (err) { next(err); }
   });
 
   // GET /api/clients/:id (con mensajes y compras)
+  // Solo se ve si el cliente pertenece al alcance (sucursal propia o admin).
+  // Fuera del alcance se responde 404 para no revelar que existe.
   app.get('/api/clients/:id', async (req, res, next) => {
     try {
       const id = parseClientId(req, res);
       if (!id) return;
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const client = await getClient(id);
-      if (!client) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
+      if (!client || !scopeAllows(scope, client.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       const messages = await pool.query(
         'SELECT * FROM crm_messages WHERE client_id = $1 ORDER BY date DESC, id DESC', [id]
       );
@@ -199,14 +307,34 @@ function createApp(pool) {
   });
 
   // PUT /api/clients/:id (actualización parcial)
-  const CLIENT_FIELDS = ['name', 'phone', 'branch', 'carrier', 'status', 'next_followup_date', 'notes'];
+  // Solo se edita si el cliente pertenece al alcance. Cambiar la sucursal
+  // mueve al cliente a la vista de la otra sucursal; cambiar la paquetería
+  // a 'Otra' exige carrier_other, y al salir de 'Otra' se limpia.
+  const CLIENT_FIELDS = ['name', 'phone', 'branch', 'carrier', 'carrier_other', 'city', 'status', 'next_followup_date', 'notes'];
   app.put('/api/clients/:id', async (req, res, next) => {
     try {
       const id = parseClientId(req, res);
       if (!id) return;
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const existing = await getClient(id);
-      if (!existing) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
+      if (!existing || !scopeAllows(scope, existing.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       const b = req.body || {};
+      // Paquetería final y su nombre libre final (para validar y limpiar).
+      const finalCarrier = b.carrier !== undefined ? b.carrier : existing.carrier;
+      if (b.carrier !== undefined && !CARRIERS.includes(finalCarrier)) {
+        return res.status(400).json({ ok: false, error: 'Paquetería no válida.' });
+      }
+      let finalCarrierOther = b.carrier_other !== undefined
+        ? (String(b.carrier_other || '').trim() || null)
+        : existing.carrier_other;
+      if (finalCarrier === 'Otra' && !finalCarrierOther) {
+        return res.status(400).json({ ok: false, error: 'Escribe qué paquetería es (elegiste "Otra").' });
+      }
+      if (finalCarrier !== 'Otra') finalCarrierOther = null;
       const sets = [];
       const vals = [];
       let i = 1;
@@ -223,6 +351,8 @@ function createApp(pool) {
         if (f === 'carrier' && !CARRIERS.includes(v)) {
           return res.status(400).json({ ok: false, error: 'Paquetería no válida.' });
         }
+        if (f === 'carrier_other') v = finalCarrierOther;
+        if (f === 'city') v = String(v || '').trim() || null;
         if (f === 'status' && !STATUSES.includes(v)) {
           return res.status(400).json({ ok: false, error: 'Estado no válido.' });
         }
@@ -235,6 +365,13 @@ function createApp(pool) {
         if (f === 'notes' && v === '') v = null;
         sets.push(`${f} = $${i}`);
         vals.push(v);
+        i += 1;
+      }
+      // Si cambió la paquetería (y no se mandó carrier_other), el nombre
+      // libre final igual debe quedar guardado/limpiado.
+      if (b.carrier !== undefined && b.carrier_other === undefined) {
+        sets.push(`carrier_other = $${i}`);
+        vals.push(finalCarrierOther);
         i += 1;
       }
       if (!sets.length) return res.json({ ok: true, client: existing });
@@ -253,8 +390,13 @@ function createApp(pool) {
     try {
       const id = parseClientId(req, res);
       if (!id) return;
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const existing = await getClient(id);
-      if (!existing) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
+      if (!existing || !scopeAllows(scope, existing.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       await pool.query('DELETE FROM crm_clients WHERE id = $1', [id]);
       return res.json({ ok: true });
     } catch (err) { next(err); }
@@ -266,8 +408,13 @@ function createApp(pool) {
     try {
       const id = parseClientId(req, res);
       if (!id) return;
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const client = await getClient(id);
-      if (!client) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
+      if (!client || !scopeAllows(scope, client.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       const b = req.body || {};
       const text = String(b.text || '').trim();
       if (!text) return res.status(400).json({ ok: false, error: 'Falta el texto del mensaje.' });
@@ -294,8 +441,13 @@ function createApp(pool) {
     try {
       const id = parseClientId(req, res);
       if (!id) return;
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const client = await getClient(id);
-      if (!client) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
+      if (!client || !scopeAllows(scope, client.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       const b = req.body || {};
       const description = String(b.description || '').trim();
       if (!description) return res.status(400).json({ ok: false, error: 'Falta la descripción de la compra.' });
@@ -339,12 +491,35 @@ function createApp(pool) {
   // así que la comparación de cadenas equivale a la cronológica.
   app.get('/api/followups', async (req, res, next) => {
     try {
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
       const today = mexicoToday();
       const limit = addDaysISO(today, 7);
+      const vals = [];
+      let where = 'WHERE next_followup_date IS NOT NULL';
+      let branchFilter = null;
+      if (scope.admin) {
+        if (req.query.branch) {
+          if (!BRANCHES.includes(req.query.branch)) {
+            return res.status(400).json({ ok: false, error: 'Sucursal no válida.' });
+          }
+          branchFilter = req.query.branch;
+        }
+      } else {
+        branchFilter = scope.branch;
+      }
+      if (branchFilter) {
+        vals.push(branchFilter);
+        where += ` AND branch = $${vals.length}`;
+      }
       const r = await pool.query(
         `SELECT * FROM crm_clients
-         WHERE next_followup_date IS NOT NULL
-         ORDER BY next_followup_date ASC, name ASC`
+         ${where}
+         ORDER BY next_followup_date ASC, name ASC`,
+        vals
       );
       const followups = r.rows
         .map((row) => {
@@ -368,4 +543,4 @@ function createApp(pool) {
   return app;
 }
 
-module.exports = { createApp, mexicoToday, waLink, BRANCHES, CARRIERS, STATUSES, CHANNELS };
+module.exports = { createApp, mexicoToday, waLink, BRANCHES, REAL_BRANCHES, CARRIERS, STATUSES, CHANNELS };
