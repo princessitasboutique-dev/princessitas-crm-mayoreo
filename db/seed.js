@@ -8,6 +8,17 @@ const path = require('path');
 async function ensureSchema(client) {
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await client.query(sql);
+  // Migración para bases que ya existen (la de producción en Neon): agrega
+  // las columnas nuevas si faltan. Idempotente; si la columna ya existe el
+  // error de duplicado se ignora. Así la base en vivo se actualiza sola al
+  // desplegar, sin tocar los datos.
+  for (const col of ['carrier_other TEXT', 'city TEXT']) {
+    try {
+      await client.query(`ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS ${col}`);
+    } catch (err) {
+      if (!/already exists|duplicate/i.test(err.message)) throw err;
+    }
+  }
 }
 
 async function count(client, table) {
