@@ -46,3 +46,6 @@ form.card, .card{background:#fff;border:1px solid #e8c9d4;border-radius:14px;pad
 .history-row:first-of-type{border-top:0}
 .danger-zone{border-color:#e0a49c}
 footer{margin:28px 0 10px;color:#888;font-size:.85rem;text-align:center}
+.btnrow.column{flex-direction:column}
+.btnrow.column button{width:100%}
+.branch-gate h2{margin-top:0}
