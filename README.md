@@ -2,10 +2,24 @@
 
 App web para darle seguimiento a los **clientes de mayoreo** de Princessitas
 Ceremonias (Ulises, México): base de datos de clientes con nombre, teléfono,
-sucursal que los atiende, paquetería habitual, última compra, último mensaje,
-próxima fecha de seguimiento, historial de mensajes y compras, total comprado
-acumulado y botón de WhatsApp. Todo en español, mobile-first. La usan todos
-los colaboradores por el enlace (sin login en esta versión).
+ciudad, sucursal que los atiende, paquetería habitual (con nombre libre
+cuando es "Otra"), última compra, último mensaje, próxima fecha de
+seguimiento, historial de mensajes y compras, total comprado acumulado y
+botón de WhatsApp. Todo en español, mobile-first.
+
+**Segmentación por sucursal:** al abrir la app por primera vez cada
+colaboradora elige su sucursal (Medrano 58, Medrano 60 o Zapotlanejo) y
+solo ve los clientes que atiende esa sucursal; la elección se guarda en el
+dispositivo. El botón **"Ver todas las sucursales"** desbloquea el modo
+administrador con el **mismo PIN de la app de asistencia** (se verifica en
+el servidor contra la tabla `settings` de la base Neon compartida; el PIN
+se crea y se cambia en la app de asistencia). Los clientes con sucursal
+"Otra" solo se ven en modo administrador.
+
+> Con honestidad: esto es segmentación a nivel de dispositivo, **no**
+> cuentas de usuario con contraseña. Quien cambie la sucursal en su
+> dispositivo o conozca el PIN de administración puede ver otra sucursal.
+> Para control estricto por persona harían falta cuentas con contraseña.
 
 Stack: **Node.js + Express + PostgreSQL (`pg`) + React con Vite**.
 Un solo servicio web: Express sirve `/api/*` y el build de React
@@ -56,12 +70,19 @@ Ver `RUNBOOK.md` para los pasos completos (GitHub + Neon + Render).
 
 ## Uso
 
-- **Pestaña Clientes:** buscador por nombre o teléfono + filtros por
-  sucursal, paquetería y estado (nuevo / activo / inactivo). Cada tarjeta
-  muestra nombre, teléfono, sucursal, paquetería, estado, última compra
-  (fecha + descripción + monto), último mensaje, próxima fecha de
-  seguimiento (resaltada si está vencida o es hoy) y botón de **WhatsApp**
-  (abre el chat con el teléfono del cliente).
+- **Al abrir la app:** si es la primera vez en ese dispositivo, pregunta
+  "¿De qué sucursal eres?" (Medrano 58, Medrano 60 o Zapotlanejo). El
+  encabezado muestra la sucursal actual con "Cambiar sucursal" y el botón
+  "Ver todas las sucursales" (pide el PIN de administración; el modo
+  administrador se guarda solo en esa pestaña y se cierra con "Salir de
+  administrador").
+- **Pestaña Clientes:** buscador por nombre, teléfono **o ciudad** + filtros
+  por paquetería y estado (nuevo / activo / inactivo); en modo administrador
+  también hay filtro por sucursal. Cada tarjeta muestra nombre, teléfono,
+  ciudad, sucursal, paquetería (si es "Otra", el nombre que se escribió),
+  estado, última compra (fecha + descripción + monto), último mensaje,
+  próxima fecha de seguimiento (resaltada si está vencida o es hoy) y botón
+  de **WhatsApp** (abre el chat con el teléfono del cliente).
 - **Pestaña Seguimientos:** clientes con próxima fecha de seguimiento
   vencida, de hoy y de los próximos 7 días, en ese orden. El número en la
   pestaña es vencidos + hoy.
@@ -71,15 +92,20 @@ Ver `RUNBOOK.md` para los pasos completos (GitHub + Neon + Render).
   se actualiza el último mensaje del cliente; al registrar una compra se
   actualizan su última compra y su total comprado acumulado. También se
   puede eliminar el cliente (borra su historial).
-- **Nuevo cliente:** nombre y teléfono obligatorios; sucursal, paquetería,
-  estado, próxima fecha de seguimiento y notas opcionales.
+- **Nuevo cliente:** nombre y teléfono obligatorios; ciudad opcional;
+  sucursal (se prellena con la sucursal del dispositivo), paquetería
+  (si es "Otra" hay que escribir cuál es), estado, próxima fecha de
+  seguimiento y notas opcionales.
 
-## Sin login (versión actual)
+## Acceso: sin cuentas, con PIN solo para "Ver todas"
 
-Cualquiera con el enlace puede ver y editar el CRM. Si más adelante se
-quiere restringir el acceso, se puede agregar un PIN compartido como el de
-la app de asistencia (tabla `settings` + encabezado `x-admin-pin`); ver
-`RUNBOOK.md`.
+Cualquiera con el enlace entra y elige su sucursal. El único acceso
+protegido es el modo administrador, con el PIN de la app de asistencia
+(tabla `settings`, clave `admin_pin_hash`, hash bcrypt, en la misma base
+Neon). El PIN se crea y se cambia en la app de asistencia, no en el CRM.
+Si el CRM se despliega con una base nueva (sin asistencia), no hay PIN
+configurado y el modo administrador queda sin usar hasta que se cree el
+PIN en asistencia. El agente nunca pide ni guarda el PIN.
 
 ## Desarrollo local
 
@@ -98,8 +124,24 @@ npm test
 
 ## Endpoints principales (`/api`)
 
+Alcance obligatorio en las rutas de datos: encabezado `x-branch` con la
+sucursal del dispositivo, o `x-admin-pin` con el PIN de administración.
+Sin alcance → 400; PIN incorrecto → 401. Sin ser administrador, la lista
+y los seguimientos son siempre los de la sucursal propia (el parámetro
+`branch` se ignora); el administrador puede filtrar por cualquier
+sucursal, incluida "Otra". La ficha, la edición, el borrado y el registro
+de mensajes/compras de un cliente fuera del alcance responden 404.
+
 - `GET /api/health` → `{ok:true}`
-- `GET /api/clients?search=&branch=&carrier=&status=` → lista con búsqueda y filtros
+- `POST /api/admin/verify-pin` → `{ok, pinSet, verified}` (mismo
+  comportamiento que la app de asistencia)
+- `GET /api/clients?search=&branch=&carrier=&status=` → lista con búsqueda
+  (nombre, teléfono o ciudad) y filtros
 - `POST /api/clients` · `GET /api/clients/:id` (con mensajes y compras) · `PUT /api/clients/:id` · `DELETE /api/clients/:id`
 - `POST /api/clients/:id/messages` · `POST /api/clients/:id/purchases`
 - `GET /api/followups` → seguimientos vencidos, de hoy y próximos 7 días
+
+Migración: al arrancar, el servidor aplica `db/schema.sql` y agrega las
+columnas `carrier_other` y `city` a `crm_clients` si faltan (`ALTER TABLE
+... ADD COLUMN IF NOT EXISTS`), así la base en vivo se actualiza sola al
+desplegar sin tocar los datos.

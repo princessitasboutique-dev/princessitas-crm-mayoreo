@@ -8,9 +8,10 @@ la app de asistencia).
 > (`~/workspace/migracion-render/RUNBOOK.md`): mismo stack
 > (Node/Express + React/Vite + Postgres), misma forma de probar
 > (`npm test` con pg-mem, sin base real) y de desplegar (GitHub → Render).
-> Diferencias: sin PIN en esta versión (la usan todos los colaboradores por
-> el enlace), la base empieza vacía (sin clientes de ejemplo) y las tablas
-> llevan prefijo `crm_`.
+> Diferencias: segmentación por sucursal a nivel de dispositivo (el modo
+> administrador usa el MISMO PIN de asistencia, verificado en el servidor),
+> la base empieza vacía (sin clientes de ejemplo) y las tablas llevan
+> prefijo `crm_`.
 
 ## Paso 1 — Neon: base de datos (reutilizar la de asistencia o crear una nueva)
 
@@ -109,9 +110,10 @@ Repo: `princessitasboutique-dev/princessitas-crm-mayoreo`
 
 ## Paso 4 — Primer uso (lo hacen los colaboradores, no el agente)
 
-1. Abrir la URL en el celular: debe verse el encabezado
+1. Abrir la URL en el celular: primero pregunta "¿De qué sucursal eres?"
+   (Medrano 58, Medrano 60 o Zapotlanejo); al elegirla se ve el encabezado
    "CRM Mayoreo — Princessitas" con las pestañas Clientes y Seguimientos,
-   y el mensaje "No hay clientes todavía".
+   y el mensaje "No hay clientes de <sucursal> todavía".
 2. Probar el alta de un cliente real: nombre, teléfono, sucursal,
    paquetería, y registrarle un mensaje y una compra para confirmar el
    flujo. La base empieza vacía; no hay clientes de ejemplo que borrar.
@@ -128,25 +130,63 @@ Repo: `princessitasboutique-dev/princessitas-crm-mayoreo`
 - NO subir `node_modules/` ni `client/dist/` al repo.
 - NO poner valores reales de `DATABASE_URL` en el repo ni en `render.yaml`.
 
-## Sin login (versión actual) — PIN opcional después
+## Segmentación por sucursal y PIN de administración
 
-Cualquiera con el enlace puede ver y editar el CRM. Si más adelante se
-quiere restringir el acceso, se puede agregar un PIN compartido como el de
-la app de asistencia:
+- Cada colaboradora elige su sucursal la primera vez que abre la app (se
+  guarda en `localStorage` del dispositivo). La API exige el alcance en el
+  encabezado `x-branch` (o `x-admin-pin`); sin alcance responde 400.
+- El modo administrador ("Ver todas las sucursales") se desbloquea con el
+  **mismo PIN de la app de asistencia**: el CRM lee la tabla `settings`
+  (clave `admin_pin_hash`, hash bcrypt) de la misma base Neon compartida y
+  lo verifica con `bcrypt.compare` (`POST /api/admin/verify-pin`). El PIN
+  **se crea y se cambia en la app de asistencia, no en el CRM**; el agente
+  nunca lo pide ni lo guarda. El PIN queda guardado solo en
+  `sessionStorage` (se pide de nuevo al cerrar la pestaña).
+- Con honestidad: esto es segmentación a nivel de dispositivo, **no**
+  cuentas de usuario con contraseña. Quien cambie la sucursal en su
+  dispositivo o conozca el PIN puede ver otra sucursal.
+- Migración de base: al arrancar, el servidor aplica `db/schema.sql` y
+  además ejecuta `ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS` para
+  `carrier_other` y `city`, así la base en vivo se actualiza sola al
+  desplegar, sin tocar los datos ni a los clientes ya registrados.
 
-- Tabla `settings` (`admin_pin_hash`, bcrypt) + endpoints
-  `POST /api/admin/pin` y `POST /api/admin/verify-pin`.
-- Middleware que exija el PIN en el encabezado `x-admin-pin` en las rutas
-  de escritura (o en todas).
-- El PIN lo crean Ulises y Yareli al primer uso y lo guardan entre ellos;
-  el agente nunca lo pide ni lo guarda.
+## Actualizar un despliegue existente (nueva versión)
 
-## Verificación local (ya hecha el 2026-11-25)
+1. En el repo de GitHub, subir **solo los archivos cambiados** (misma
+   ruta que en local; la subida web reemplaza el archivo):
+   - `package.json`, `package-lock.json` (se agregó `bcrypt`)
+   - `server.js` (sin cambios de lógica; no hace falta si ya está)
+   - `src/app.js`, `src/db.js` (sin cambios; no hace falta si ya está)
+   - `db/schema.sql`, `db/seed.js` (migración de columnas nuevas)
+   - `client/src/App.jsx`, `client/src/api.js`, `client/src/styles.css`
+   - `test/smoke.mjs`, `README.md`, `RUNBOOK.md`
+   - NO subir `node_modules/` ni `client/dist/`.
+2. En Render, si el auto-deploy no se dispara solo, usar **Deploy latest
+   commit** (manual). Al arrancar, el servidor corre la migración y la app
+   sigue funcionando con los datos existentes.
 
-- `npm test`: **41/41 pruebas pasan** (pg-mem, sin base real).
+## Sin cuentas de usuario (versión actual)
+
+Cualquiera con el enlace entra y elige su sucursal. El único acceso
+protegido es el modo administrador, con el PIN de asistencia (ver arriba).
+Si más adelante se quieren cuentas por persona, haría falta un sistema de
+usuarios con contraseña (fuera del alcance actual).
+
+## Verificación local (actualizada el 2026-11-25)
+
+- `npm test`: **69/69 pruebas pasan** (pg-mem, sin base real). Incluyen:
+  verificación del PIN (sin configurar, incorrecto y correcto), alcance
+  obligatorio (lista y seguimientos sin sucursal ni PIN → 400), filtrado
+  por sucursal (cada sucursal solo ve la suya; el administrador ve todas
+  y puede filtrar por 'Otra'), ficha/edición/borrado/mensajes/compras
+  fuera del alcance → 404, paquetería 'Otra' (sin nombre → 400; con
+  nombre se guarda y se muestra como `carrier_display`; al salir de
+  'Otra' se limpia) y ciudad (alta, edición y búsqueda por ciudad).
 - `npm run build`: build de Vite OK (32 módulos, `dist/` generado).
-- Smoke test con curl contra la app corriendo en local (pg-mem): todos
-  los endpoints responden — health, lista vacía, crear, buscar, ficha,
-  mensaje, compra, seguimientos, PUT y DELETE.
+- Smoke test con curl contra la app corriendo en local (sin
+  `DATABASE_URL`): `/api/health` responde `{"ok":true}`, `/api/clients`
+  sin alcance responde 400 y el frontend compilado carga (incluye los
+  textos "¿De qué sucursal eres?", "Ver todas las sucursales" y
+  "¿Qué paquetería?"). Las rutas de datos necesitan la base real.
 - `node server.js` (sin `DATABASE_URL`): arranca, `/api/health` responde
   `{"ok":true}` y sirve el frontend compilado.
