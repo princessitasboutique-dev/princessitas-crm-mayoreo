@@ -132,7 +132,12 @@ function createApp(pool) {
   // calcular `level` (efectivo) y se quitan de la respuesta. Si una fila
   // no trae los agregados (no debería pasar: todas las lecturas usan el
   // JOIN), el nivel cae en 'nuevo' por defecto.
-  const normClient = (r) => {
+  // Montos: con hideAmounts en true (vista de sucursal, sin PIN de
+  // administración) los montos salen en null para que el dispositivo de
+  // la sucursal ni siquiera los reciba: la vendedora ve solo la
+  // categoría (nivel) de cada cliente y la fecha y descripción de sus
+  // compras, no cuánto compra. Con PIN de administración salen completos.
+  const normClient = (r, hideAmounts = false) => {
     const level = effectiveLevel(r);
     const { m12, p12, first_purchase, ...rest } = r;
     return {
@@ -141,8 +146,8 @@ function createApp(pool) {
       level_override: r.level_override || null,
       // Paquetería a mostrar: si es 'Otra', el nombre libre que se escribió.
       carrier_display: r.carrier === 'Otra' && r.carrier_other ? r.carrier_other : r.carrier,
-      total_purchased: money(r.total_purchased),
-      last_purchase_amount: r.last_purchase_amount == null ? null : money(r.last_purchase_amount),
+      total_purchased: hideAmounts ? null : money(r.total_purchased),
+      last_purchase_amount: hideAmounts ? null : (r.last_purchase_amount == null ? null : money(r.last_purchase_amount)),
       last_purchase_date: toISODate(r.last_purchase_date),
       last_message_date: toISODate(r.last_message_date),
       next_followup_date: toISODate(r.next_followup_date),
@@ -152,11 +157,11 @@ function createApp(pool) {
     };
   };
   const normMessage = (r) => ({ ...r, date: toISODate(r.date), created_at: toISODateTime(r.created_at) });
-  const normPurchase = (r) => ({
-    ...r, date: toISODate(r.date), amount: money(r.amount), created_at: toISODateTime(r.created_at),
+  const normPurchase = (r, hideAmounts = false) => ({
+    ...r, date: toISODate(r.date), amount: hideAmounts ? null : money(r.amount), created_at: toISODateTime(r.created_at),
   });
 
-  async function getClient(id) {
+  async function getClient(id, hideAmounts = false) {
     const windowStart = addDaysISO(mexicoToday(), -365);
     const r = await pool.query(
       `SELECT ${CLIENT_LEVEL_COLUMNS} FROM crm_clients c
@@ -164,7 +169,7 @@ function createApp(pool) {
        WHERE c.id = $1`,
       [id, windowStart]
     );
-    return r.rows[0] ? normClient(r.rows[0]) : null;
+    return r.rows[0] ? normClient(r.rows[0], hideAmounts) : null;
   }
 
   function parseClientId(req, res) {
@@ -312,7 +317,7 @@ function createApp(pool) {
         `SELECT ${CLIENT_LEVEL_COLUMNS} FROM crm_clients c ${levelAggJoin(`$${vals.length}`)} ${where} ORDER BY c.name ASC`,
         vals
       );
-      let clients = r.rows.map(normClient);
+      let clients = r.rows.map((row) => normClient(row, !scope.admin));
       if (req.query.level) clients = clients.filter((c) => c.level === req.query.level);
       return res.json({ ok: true, clients });
     } catch (err) { next(err); }
@@ -372,7 +377,7 @@ function createApp(pool) {
       if (!scope) {
         return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
       }
-      const client = await getClient(id);
+      const client = await getClient(id, !scope.admin);
       if (!client || !scopeAllows(scope, client.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       const messages = await pool.query(
         'SELECT * FROM crm_messages WHERE client_id = $1 ORDER BY date DESC, id DESC', [id]
@@ -384,7 +389,7 @@ function createApp(pool) {
         ok: true,
         client,
         messages: messages.rows.map(normMessage),
-        purchases: purchases.rows.map(normPurchase),
+        purchases: purchases.rows.map((p) => normPurchase(p, !scope.admin)),
       });
     } catch (err) { next(err); }
   });
@@ -403,7 +408,7 @@ function createApp(pool) {
       if (!scope) {
         return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
       }
-      const existing = await getClient(id);
+      const existing = await getClient(id, !scope.admin);
       if (!existing || !scopeAllows(scope, existing.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
       const b = req.body || {};
       // Paquetería final y su nombre libre final (para validar y limpiar).
@@ -478,7 +483,7 @@ function createApp(pool) {
       );
       // Se relee con getClient para devolver el nivel efectivo actualizado
       // (el override, si se fijó, o el calculado).
-      const updated = await getClient(r.rows[0].id);
+      const updated = await getClient(r.rows[0].id, !scope.admin);
       return res.json({ ok: true, client: updated });
     } catch (err) { next(err); }
   });
@@ -576,7 +581,7 @@ function createApp(pool) {
          WHERE id = $5`,
         [toISODate(last.rows[0].date), last.rows[0].description, money(last.rows[0].amount), money(total.rows[0].total), id]
       );
-      return res.status(201).json({ ok: true, purchase: normPurchase(r.rows[0]) });
+      return res.status(201).json({ ok: true, purchase: normPurchase(r.rows[0], !scope.admin) });
     } catch (err) { next(err); }
   });
 
@@ -629,7 +634,7 @@ function createApp(pool) {
          last.rows.length ? money(last.rows[0].amount) : null,
          money(total.rows[0].total), id]
       );
-      return res.json({ ok: true, purchase: normPurchase(deleted) });
+      return res.json({ ok: true, purchase: normPurchase(deleted, !scope.admin) });
     } catch (err) { next(err); }
   });
 
@@ -677,7 +682,7 @@ function createApp(pool) {
       );
       const followups = r.rows
         .map((row) => {
-          const c = normClient(row);
+          const c = normClient(row, !scope.admin);
           const d = c.next_followup_date;
           const status = d < today ? 'vencido' : (d === today ? 'hoy' : 'próximo');
           return { ...c, followup_status: status };
