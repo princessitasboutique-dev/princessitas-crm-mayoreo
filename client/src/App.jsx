@@ -5,7 +5,7 @@
 //
 // Segmentación por sucursal (a nivel de dispositivo): al abrir la app por
 // primera vez se elige la sucursal y se guarda en el dispositivo; cada
-// colaboradora solo ve los clientes de su sucursal. El botón "Ver todas"
+// colaboradora solo ve los clientes de su sucursal. El botón "Administración"
 // desbloquea el modo administrador con el MISMO PIN de la app de asistencia
 // (se verifica en el servidor; el PIN se crea y se cambia en asistencia).
 // Esto NO son cuentas de usuario con contraseña: quien cambie la sucursal
@@ -102,6 +102,35 @@ function ClientCard({ client, onOpen }) {
 }
 
 const EMPTY_NEW = { name: '', phone: '', branch: 'Medrano 58', carrier: 'Paquetexpress', carrier_other: '', city: '', status: 'nuevo', next_followup_date: '', notes: '' };
+
+// Formulario de PIN de administrador (mismo en la puerta de sucursal y en
+// la vista principal). Con el PIN correcto entra al modo administrador.
+function PinForm({ pinSet, pinInput, setPinInput, onSubmit, onCancel }) {
+  return (
+    <form className="card" onSubmit={onSubmit}>
+      <h2>Administración</h2>
+      <p className="muted">
+        {pinSet === false
+          ? 'Todavía no hay PIN de administración. El PIN se crea en la app de asistencia (es el mismo).'
+          : 'Escribe el PIN de administración (el mismo de la app de asistencia).'}
+      </p>
+      <label>PIN *</label>
+      <input
+        required
+        type="password"
+        inputMode="numeric"
+        value={pinInput}
+        onChange={(e) => setPinInput(e.target.value)}
+        placeholder="PIN de administración"
+        autoComplete="off"
+      />
+      <div className="btnrow">
+        <button type="submit">Entrar como administrador</button>
+        <button type="button" className="secondary" onClick={onCancel}>Cancelar</button>
+      </div>
+    </form>
+  );
+}
 
 export default function App() {
   const [myBranch, setMyBranch] = useState(() => {
@@ -357,7 +386,8 @@ export default function App() {
   ];
 
   // Puerta de sucursal: primera vez que se abre la app en este dispositivo.
-  if (!myBranch) {
+  // En modo administrador no aplica: se entra directo a ver todas las sucursales.
+  if (!myBranch && !adminMode) {
     return (
       <div className="app">
         <header>
@@ -374,7 +404,20 @@ export default function App() {
               <button key={b} onClick={() => chooseBranch(b)}>{b}</button>
             ))}
           </div>
+          <div className="admin-entry">
+            <button className="admin-btn" onClick={openPinForm}>Administración</button>
+          </div>
         </div>
+        {msg && <div className={`msg ${msg.type === 'ok' ? 'ok' : 'err'}`}>{msg.text}</div>}
+        {showPinForm && !adminMode && (
+          <PinForm
+            pinSet={pinSet}
+            pinInput={pinInput}
+            setPinInput={setPinInput}
+            onSubmit={submitPin}
+            onCancel={() => setShowPinForm(false)}
+          />
+        )}
         <footer>Princessitas Ceremonias · CRM Mayoreo</footer>
       </div>
     );
@@ -394,32 +437,17 @@ export default function App() {
         <button className="secondary small" onClick={changeBranch}>Cambiar sucursal</button>
         {adminMode
           ? <button className="secondary small" onClick={exitAdmin}>Salir de administrador</button>
-          : <button className="secondary small" onClick={openPinForm}>Ver todas las sucursales</button>}
+          : <button onClick={openPinForm}>Administración</button>}
       </div>
 
       {showPinForm && !adminMode && (
-        <form className="card" onSubmit={submitPin}>
-          <h2>Ver todas las sucursales</h2>
-          <p className="muted">
-            {pinSet === false
-              ? 'Todavía no hay PIN de administración. El PIN se crea en la app de asistencia (es el mismo).'
-              : 'Escribe el PIN de administración (el mismo de la app de asistencia).'}
-          </p>
-          <label>PIN *</label>
-          <input
-            required
-            type="password"
-            inputMode="numeric"
-            value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            placeholder="PIN de administración"
-            autoComplete="off"
-          />
-          <div className="btnrow">
-            <button type="submit">Entrar como administrador</button>
-            <button type="button" className="secondary" onClick={() => setShowPinForm(false)}>Cancelar</button>
-          </div>
-        </form>
+        <PinForm
+          pinSet={pinSet}
+          pinInput={pinInput}
+          setPinInput={setPinInput}
+          onSubmit={submitPin}
+          onCancel={() => setShowPinForm(false)}
+        />
       )}
 
       <p className="muted">Seguimiento a clientes de mayoreo: compras, mensajes y próximos contactos.</p>

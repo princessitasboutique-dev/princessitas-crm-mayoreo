@@ -49,3 +49,5 @@ footer{margin:28px 0 10px;color:#888;font-size:.85rem;text-align:center}
 .btnrow.column{flex-direction:column}
 .btnrow.column button{width:100%}
 .branch-gate h2{margin-top:0}
+.admin-entry{margin-top:18px;border-top:1px solid #f0e0e6;padding-top:18px}
+.admin-btn{width:100%;background:#8e2a55}
