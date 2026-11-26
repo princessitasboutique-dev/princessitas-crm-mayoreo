@@ -85,11 +85,11 @@ VALUES ('Cliente Viejo', '3300000000', 'Medrano 58', 'Paquetexpress', 'activo');
 
   const columns = async () => {
     const r = await pool.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'crm_clients' AND column_name IN ('carrier_other', 'city')"
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'crm_clients' AND column_name IN ('carrier_other', 'city', 'level_override')"
     );
     return r.rows.map((x) => x.column_name);
   };
-  check('v1: antes de ensureSchema faltan carrier_other y city', (await columns()).length === 0);
+  check('v1: antes de ensureSchema faltan carrier_other, city y level_override', (await columns()).length === 0);
 
   // En pg-mem, ensureSchema sobre una base v1 lanza un error propio de
   // pg-mem en el CREATE TABLE IF NOT EXISTS (la tabla ya existe); en
@@ -102,7 +102,7 @@ VALUES ('Cliente Viejo', '3300000000', 'Medrano 58', 'Paquetexpress', 'activo');
     console.log(`  (ensureSchema lanzó en pg-mem, se tolera: ${String(err.message).split('\n')[0].slice(0, 120)})`);
   }
   const cols = await columns();
-  check('v1: tras ensureSchema existen carrier_other y city', cols.includes('carrier_other') && cols.includes('city'), cols.join(','));
+  check('v1: tras ensureSchema existen carrier_other, city y level_override', cols.includes('carrier_other') && cols.includes('city') && cols.includes('level_override'), cols.join(','));
   const old = await pool.query('SELECT COUNT(*)::int AS c FROM crm_clients WHERE name = $1', ['Cliente Viejo']);
   check('v1: el cliente guardado con el esquema viejo sigue ahí', old.rows[0].c === 1);
 
@@ -129,7 +129,7 @@ VALUES ('Cliente Viejo', '3300000000', 'Medrano 58', 'Paquetexpress', 'activo');
     // Idempotencia: correr ensureSchema otra vez no rompe nada.
     try { await ensureSchema(pool); } catch { /* mismo error propio de pg-mem, se tolera */ }
     const cols2 = await columns();
-    check('v1: segundo ensureSchema deja las columnas y no borra datos', cols2.includes('carrier_other') && cols2.includes('city'), cols2.join(','));
+    check('v1: segundo ensureSchema deja las columnas y no borra datos', cols2.includes('carrier_other') && cols2.includes('city') && cols2.includes('level_override'), cols2.join(','));
     r = await req('/api/clients', { method: 'POST', headers: { 'x-branch': 'Zapotlanejo' }, body: { name: 'Boutique Rosa', phone: '3344445555', branch: 'Zapotlanejo', carrier: 'Estafeta', city: 'Guadalajara' } });
     check('v1: tras segundo ensureSchema, POST con ciudad -> 201', r.status === 201 && r.json?.client?.city === 'Guadalajara', JSON.stringify(r.json));
   } finally {
@@ -351,6 +351,131 @@ async function main() {
 
     // 13. Migración desde esquema v1 (regresión del 500 al guardar).
     await testV1Migration();
+
+    // 14. Niveles de cliente: cálculo automático, override manual y filtro.
+    // Las fechas se calculan desde el día de hoy (México) para que la
+    // prueba funcione cualquier día que se corra.
+    console.log('Niveles de cliente');
+    function todayMX() {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date());
+    }
+    function daysAgo(n) {
+      const d = new Date(`${todayMX()}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - n);
+      return d.toISOString().slice(0, 10);
+    }
+    let phoneSeq = 3390000000;
+    async function mkLevelClient(name) {
+      phoneSeq += 1;
+      const rr = await req('/api/clients', { method: 'POST', headers: H58, body: { name, phone: String(phoneSeq), branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+      return rr.json?.client?.id;
+    }
+    async function addPur(id, days, amount) {
+      return req(`/api/clients/${id}/purchases`, { method: 'POST', headers: H58, body: { date: daysAgo(days), description: 'Compra de prueba', amount } });
+    }
+    async function levelOf(id) {
+      const rr = await req(`/api/clients/${id}`, { headers: H58 });
+      return rr.json?.client;
+    }
+    let c;
+
+    // Top: M12 exactamente $100,000 -> top; $99,999 -> no es top.
+    const topId = await mkLevelClient('Nivel Top');
+    await addPur(topId, 10, 100000);
+    c = await levelOf(topId);
+    check('Nivel Top: M12 = $100,000 exactos -> top', c?.level === 'top' && c?.level_override === null, JSON.stringify(c));
+    const casiTopId = await mkLevelClient('Nivel Casi Top');
+    await addPur(casiTopId, 10, 99999);
+    c = await levelOf(casiTopId);
+    check('Nivel: M12 = $99,999 -> no es top (nuevo, primera compra reciente)', c?.level === 'nuevo', JSON.stringify(c));
+
+    // Constante: P12 = 6 -> constante; P12 = 5 con primera compra vieja -> ocasional.
+    const constId = await mkLevelClient('Nivel Constante');
+    for (const d of [10, 40, 80, 120, 180, 300]) await addPur(constId, d, 1000);
+    c = await levelOf(constId);
+    check('Nivel Constante: P12 = 6 -> constante', c?.level === 'constante', JSON.stringify(c));
+    const casiConstId = await mkLevelClient('Nivel Casi Constante');
+    for (const d of [10, 40, 80, 120, 300]) await addPur(casiConstId, d, 1000);
+    c = await levelOf(casiConstId);
+    check('Nivel: P12 = 5 y primera compra hace 300 días -> ocasional', c?.level === 'ocasional', JSON.stringify(c));
+
+    // Esporádico: P12 = 2 y P12 = 3.
+    const esp2Id = await mkLevelClient('Nivel Esporádico 2');
+    await addPur(esp2Id, 10, 5000);
+    await addPur(esp2Id, 200, 5000);
+    c = await levelOf(esp2Id);
+    check('Nivel Esporádico: P12 = 2 -> esporadico', c?.level === 'esporadico', JSON.stringify(c));
+    const esp3Id = await mkLevelClient('Nivel Esporádico 3');
+    for (const d of [10, 100, 200]) await addPur(esp3Id, d, 5000);
+    c = await levelOf(esp3Id);
+    check('Nivel Esporádico: P12 = 3 -> esporadico', c?.level === 'esporadico', JSON.stringify(c));
+
+    // Nuevo: sin compras; primera compra hace 90 días exactos -> nuevo;
+    // hace 91 días -> ocasional.
+    const nuevoId = await mkLevelClient('Nivel Nuevo Sin Compras');
+    c = await levelOf(nuevoId);
+    check('Nivel Nuevo: sin compras -> nuevo', c?.level === 'nuevo', JSON.stringify(c));
+    const nuevo90Id = await mkLevelClient('Nivel Nuevo 90');
+    await addPur(nuevo90Id, 90, 2000);
+    c = await levelOf(nuevo90Id);
+    check('Nivel Nuevo: primera compra hace 90 días exactos -> nuevo', c?.level === 'nuevo', JSON.stringify(c));
+    const ocas91Id = await mkLevelClient('Nivel Ocasional 91');
+    await addPur(ocas91Id, 91, 2000);
+    c = await levelOf(ocas91Id);
+    check('Nivel Ocasional: primera compra hace 91 días -> ocasional', c?.level === 'ocasional', JSON.stringify(c));
+
+    // Ocasional: solo compras viejas (fuera de los 365 días).
+    const ocasViejoId = await mkLevelClient('Nivel Ocasional Viejo');
+    await addPur(ocasViejoId, 400, 2000);
+    c = await levelOf(ocasViejoId);
+    check('Nivel Ocasional: solo compras viejas (P12 = 0, primera hace 400 días) -> ocasional', c?.level === 'ocasional', JSON.stringify(c));
+
+    // Orden: Top manda sobre Constante (M12 = $120,000 y P12 = 6).
+    const topConstId = await mkLevelClient('Nivel Top y Constante');
+    for (const d of [10, 40, 80, 120, 180, 300]) await addPur(topConstId, d, 20000);
+    c = await levelOf(topConstId);
+    check('Nivel: Top manda sobre Constante (M12 = $120,000, P12 = 6) -> top', c?.level === 'top', JSON.stringify(c));
+
+    // La lista trae level y level_override en cada cliente.
+    r = await req('/api/clients', { headers: H58 });
+    check('Lista: cada cliente trae level y level_override', r.status === 200 && (r.json?.clients || []).length > 0 && r.json.clients.every((x) => typeof x.level === 'string' && 'level_override' in x), JSON.stringify((r.json?.clients || []).slice(0, 2)));
+
+    // Override manual: fija un nivel, manda sobre el calculado y se puede
+    // volver a Automático; un nivel inválido se rechaza.
+    r = await req(`/api/clients/${topId}`, { method: 'PUT', headers: H58, body: { level_override: 'ocasional' } });
+    check('Override: fijar ocasional en un Top -> level ocasional, override guardado', r.status === 200 && r.json?.client?.level === 'ocasional' && r.json?.client?.level_override === 'ocasional', JSON.stringify(r.json));
+    r = await req(`/api/clients/${topId}`, { method: 'PUT', headers: H58, body: { level_override: 'vip' } });
+    check('Override: nivel inválido -> 400', r.status === 400, JSON.stringify(r.json));
+    r = await req(`/api/clients/${topId}`, { method: 'PUT', headers: H58, body: { level_override: '' } });
+    check('Override: volver a Automático -> level top calculado, override null', r.status === 200 && r.json?.client?.level === 'top' && r.json?.client?.level_override === null, JSON.stringify(r.json));
+
+    // Filtro por nivel: solo trae los del nivel pedido, en admin y en
+    // sucursal; combinado con el alcance (la sucursal no ve otras).
+    r = await req('/api/clients?level=top', { headers: HADMIN });
+    let ids = (r.json?.clients || []).map((x) => x.id);
+    check('Filtro level=top (admin) -> trae los Top y no a los ocasionales', r.status === 200 && ids.includes(topId) && ids.includes(topConstId) && !ids.includes(ocas91Id), JSON.stringify(ids));
+    r = await req('/api/clients?level=nuevo', { headers: HADMIN });
+    ids = (r.json?.clients || []).map((x) => x.id);
+    check('Filtro level=nuevo (admin) -> trae los nuevos (Sol, sin compras, 90 días) y no a los Top', r.status === 200 && ids.includes(nuevoId) && ids.includes(nuevo90Id) && ids.includes(solId) && !ids.includes(topId), JSON.stringify(ids));
+    r = await req('/api/clients?level=esporadico', { headers: H58 });
+    ids = (r.json?.clients || []).map((x) => x.id);
+    check('Filtro level=esporadico (sucursal) -> trae los esporádicos de Medrano 58', r.status === 200 && ids.includes(esp2Id) && ids.includes(esp3Id) && !ids.includes(topId), JSON.stringify(ids));
+    r = await req('/api/clients?level=mal', { headers: H58 });
+    check('Filtro level inválido -> 400', r.status === 400, JSON.stringify(r.json));
+    // El override también se refleja en el filtro.
+    await req(`/api/clients/${topId}`, { method: 'PUT', headers: H58, body: { level_override: 'constante' } });
+    r = await req('/api/clients?level=constante', { headers: HADMIN });
+    ids = (r.json?.clients || []).map((x) => x.id);
+    check('Filtro level=constante con override -> el Top fijado a mano aparece como constante', r.status === 200 && ids.includes(topId), JSON.stringify(ids));
+    await req(`/api/clients/${topId}`, { method: 'PUT', headers: H58, body: { level_override: '' } });
+
+    // Seguimientos: la ficha también trae el nivel.
+    await req(`/api/clients/${topConstId}`, { method: 'PUT', headers: H58, body: { next_followup_date: todayMX() } });
+    r = await req('/api/followups', { headers: HADMIN });
+    const fTop = (r.json?.followups || []).find((x) => x.id === topConstId);
+    check('Seguimientos: el cliente trae level top y seguimiento hoy', fTop?.level === 'top' && fTop?.followup_status === 'hoy', JSON.stringify(fTop));
   } finally {
     server.close();
     await pool.end().catch(() => {});
