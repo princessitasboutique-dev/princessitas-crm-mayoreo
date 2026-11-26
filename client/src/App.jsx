@@ -12,6 +12,7 @@
 // en su dispositivo o conozca el PIN puede ver otra sucursal.
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, setApiScope } from './api.js';
+import { sortClients, SORT_OPTIONS, DEFAULT_SORT, SORT_STORAGE_KEY, isValidSort } from './sortClients.mjs';
 
 const BRANCHES = ['Medrano 58', 'Medrano 60', 'Zapotlanejo', 'Otra'];
 const REAL_BRANCHES = ['Medrano 58', 'Medrano 60', 'Zapotlanejo'];
@@ -168,6 +169,14 @@ export default function App() {
   const [carrier, setCarrier] = useState('');
   const [status, setStatus] = useState('');
   const [level, setLevel] = useState('');
+  // Orden de la lista de clientes: se guarda en el dispositivo (como la
+  // sucursal) y por defecto es por nivel, como pidió Ulises.
+  const [sortBy, setSortBy] = useState(() => {
+    try {
+      const v = localStorage.getItem(SORT_STORAGE_KEY);
+      return isValidSort(v) ? v : DEFAULT_SORT;
+    } catch { return DEFAULT_SORT; }
+  });
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null); // {type:'ok'|'err', text}
   const [showNew, setShowNew] = useState(false);
@@ -228,6 +237,12 @@ export default function App() {
     try { localStorage.setItem('crm_branch', b); } catch { /* sin almacenamiento */ }
     setMyBranch(b);
     setMsg({ type: 'ok', text: `Sucursal: ${b}. Solo ves los clientes que atiende esta sucursal.` });
+  };
+
+  const chooseSort = (v) => {
+    const value = isValidSort(v) ? v : DEFAULT_SORT;
+    try { localStorage.setItem(SORT_STORAGE_KEY, value); } catch { /* sin almacenamiento */ }
+    setSortBy(value);
   };
 
   const changeBranch = () => {
@@ -400,6 +415,9 @@ export default function App() {
 
   const overdueCount = followups.filter((c) => c.followup_status === 'vencido').length;
   const todayCount = followups.filter((c) => c.followup_status === 'hoy').length;
+  // La lista de Clientes se ordena según el control "Ordenar por"
+  // (por defecto, por nivel: Top, Constante, Esporádico, Ocasional, Nuevo).
+  const sortedClients = sortClients(clients, sortBy);
   const groups = [
     { key: 'vencido', title: `Vencidos (${overdueCount})`, items: followups.filter((c) => c.followup_status === 'vencido') },
     { key: 'hoy', title: `Hoy (${todayCount})`, items: followups.filter((c) => c.followup_status === 'hoy') },
@@ -512,6 +530,11 @@ export default function App() {
                     <option value="">Todos los estados</option>
                     {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                   </select>
+                  <label>Ordenar por
+                    <select value={sortBy} onChange={(e) => chooseSort(e.target.value)}>
+                      {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  </label>
                 </div>
               </div>
 
@@ -578,7 +601,7 @@ export default function App() {
                     : `No hay clientes de ${myBranch} todavía. Agrega el primero con el botón de arriba.`}
                 </p>
               )}
-              {clients.map((c) => (
+              {sortedClients.map((c) => (
                 <ClientCard key={c.id} client={c} onOpen={() => openClient(c.id)} />
               ))}
             </>
