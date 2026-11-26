@@ -72,7 +72,7 @@ function ClientCard({ client, onOpen }) {
       <div className="client-head">
         <div>
           <div className="name">{client.name}</div>
-          <div className="muted">{client.phone}{client.city ? ` · ${client.city}` : ''}</div>
+          <div className="muted">{[client.phone, client.city].filter(Boolean).join(' · ')}</div>
         </div>
         <div className="badges">
           <span className={`badge level-${client.level || 'nuevo'}`}>{levelLabel(client.level)}</span>
@@ -297,7 +297,9 @@ export default function App() {
       setDetail(data);
       setEditForm({
         name: data.client.name,
-        phone: data.client.phone,
+        // El teléfono es opcional: si viene null de la API, el campo queda
+        // vacío (un input controlado con null daría error en React).
+        phone: data.client.phone || '',
         branch: data.client.branch,
         carrier: data.client.carrier,
         carrier_other: data.client.carrier_other || '',
@@ -522,8 +524,8 @@ export default function App() {
                   <h2>Nuevo cliente</h2>
                   <label>Nombre *</label>
                   <input required value={newForm.name} onChange={(e) => setNewForm({ ...newForm, name: e.target.value })} placeholder="Nombre del cliente o boutique" />
-                  <label>Teléfono (WhatsApp) *</label>
-                  <input required value={newForm.phone} onChange={(e) => setNewForm({ ...newForm, phone: e.target.value })} placeholder="10 dígitos" inputMode="tel" />
+                  <label>Teléfono (WhatsApp) (opcional)</label>
+                  <input value={newForm.phone} onChange={(e) => setNewForm({ ...newForm, phone: e.target.value })} placeholder="10 dígitos (opcional)" inputMode="tel" />
                   <div className="grid2">
                     <div>
                       <label>Ciudad</label>
@@ -607,9 +609,7 @@ export default function App() {
           <button className="secondary small" onClick={closeDetail}>← Volver a la lista</button>
           <h2>{detail.client.name}</h2>
           <p className="muted">
-            {detail.client.phone}
-            {detail.client.city ? ` · ${detail.client.city}` : ''}
-            {' · '}{detail.client.branch} · {carrierLabel(detail.client)} · {statusLabel(detail.client.status)}
+            {[detail.client.phone, detail.client.city, detail.client.branch, carrierLabel(detail.client), statusLabel(detail.client.status)].filter(Boolean).join(' · ')}
             {' · '}Total comprado: <b>{fmtMoney(detail.client.total_purchased)}</b>
             {' · '}Nivel: <span className={`badge level-${detail.client.level || 'nuevo'}`}>{levelLabel(detail.client.level)}</span>
             {detail.client.level_override && <span className="muted"> (fijado a mano)</span>}
@@ -624,8 +624,8 @@ export default function App() {
             <h3>Datos del cliente</h3>
             <label>Nombre *</label>
             <input required value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
-            <label>Teléfono (WhatsApp) *</label>
-            <input required value={editForm.phone} onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })} inputMode="tel" />
+            <label>Teléfono (WhatsApp) (opcional)</label>
+            <input value={editForm.phone} onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })} placeholder="10 dígitos (opcional)" inputMode="tel" />
             <div className="grid2">
               <div>
                 <label>Ciudad</label>
