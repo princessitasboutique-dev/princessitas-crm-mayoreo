@@ -590,6 +590,41 @@ async function main() {
     check('sortClients no muta el arreglo original', JSON.stringify(entrada) === antes);
     check('sortClients con lista vacía o nula -> []',
       sortClients([], 'level').length === 0 && sortClients(null, 'level').length === 0);
+
+    // 17. Borrar una compra (DELETE /api/clients/:id/purchases/:purchaseId):
+    // recalcula última compra y total; sirve para quitar los "Abono a
+    // crédito" que el reporte mezcla con las ventas. Se usa un cliente
+    // dedicado para no tocar los totales de Luna.
+    console.log('Borrar una compra');
+    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Boutique Baja', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('POST cliente para borrar compras -> 201', r.status === 201, JSON.stringify(r.json));
+    const bajaId = r.json?.client?.id;
+    r = await req(`/api/clients/${bajaId}/purchases`, { method: 'POST', headers: H58, body: { date: '2026-11-10', description: 'Venta 1 · 1 artículo(s): Abono a crédito', amount: 5000 } });
+    check('POST abono $5,000 -> 201', r.status === 201, JSON.stringify(r.json));
+    const abonoId = r.json?.purchase?.id;
+    r = await req(`/api/clients/${bajaId}/purchases`, { method: 'POST', headers: H58, body: { date: '2026-11-20', description: 'Venta 2 · 4 artículo(s): 4 vestidos', amount: 3000 } });
+    check('POST compra $3,000 -> 201', r.status === 201, JSON.stringify(r.json));
+    const compraId = r.json?.purchase?.id;
+    r = await req(`/api/clients/${bajaId}`, { headers: H58 });
+    check('Ficha con 2 compras -> total $8,000 y última compra es la de $3,000', r.json?.client?.total_purchased === 8000 && r.json?.client?.last_purchase_description === 'Venta 2 · 4 artículo(s): 4 vestidos', JSON.stringify(r.json?.client));
+    r = await req(`/api/clients/${bajaId}/purchases/${abonoId}`, { method: 'DELETE', headers: H58 });
+    check('DELETE abono -> 200 y devuelve la compra borrada', r.status === 200 && r.json?.purchase?.id === abonoId && r.json?.purchase?.amount === 5000, JSON.stringify(r.json));
+    r = await req(`/api/clients/${bajaId}`, { headers: H58 });
+    check('Ficha tras borrar abono -> total $3,000 y última compra sin cambio', r.json?.client?.total_purchased === 3000 && r.json?.client?.last_purchase_description === 'Venta 2 · 4 artículo(s): 4 vestidos' && r.json?.client?.last_purchase_amount === 3000, JSON.stringify(r.json?.client));
+    r = await req(`/api/clients/${bajaId}/purchases/${abonoId}`, { method: 'DELETE', headers: H58 });
+    check('DELETE compra ya borrada -> 404', r.status === 404, JSON.stringify(r.json));
+    r = await req(`/api/clients/${bajaId}/purchases/abc`, { method: 'DELETE', headers: H58 });
+    check('DELETE compra con id inválido -> 400', r.status === 400, JSON.stringify(r.json));
+    r = await req(`/api/clients/${bajaId}/purchases/${compraId}`, { method: 'DELETE', headers: HZ });
+    check('DELETE compra de otra sucursal -> 404', r.status === 404, JSON.stringify(r.json));
+    r = await req(`/api/clients/${bajaId}/purchases/${compraId}`, { method: 'DELETE' });
+    check('DELETE compra sin alcance -> 400', r.status === 400, JSON.stringify(r.json));
+    r = await req(`/api/clients/${bajaId}/purchases/${compraId}`, { method: 'DELETE', headers: H58 });
+    check('DELETE última compra -> 200', r.status === 200, JSON.stringify(r.json));
+    r = await req(`/api/clients/${bajaId}`, { headers: H58 });
+    check('Ficha sin compras -> total 0 y última compra en null', r.json?.client?.total_purchased === 0 && r.json?.client?.last_purchase_date === null && r.json?.client?.last_purchase_description === null, JSON.stringify(r.json?.client));
+    r = await req('/api/clients/99999/purchases/1', { method: 'DELETE', headers: H58 });
+    check('DELETE compra de cliente inexistente -> 404', r.status === 404, JSON.stringify(r.json));
   } finally {
     server.close();
     await pool.end().catch(() => {});
