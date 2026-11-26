@@ -19,12 +19,12 @@ async function ensureSchema(client) {
   await client.query(sql);
 }
 
-// Agrega carrier_other y city a crm_clients si faltan. Idempotente: si la
-// columna ya existe se ignora el error, y si la tabla aún no existe (base
-// nueva: la crea schema.sql después, ya con las columnas) también se
-// ignora. Cualquier otro error sí se propaga.
+// Agrega carrier_other, city y level_override a crm_clients si faltan.
+// Idempotente: si la columna ya existe se ignora el error, y si la tabla
+// aún no existe (base nueva: la crea schema.sql después, ya con las
+// columnas) también se ignora. Cualquier otro error sí se propaga.
 async function addMissingColumns(client) {
-  for (const col of ['carrier_other TEXT', 'city TEXT']) {
+  for (const col of ['carrier_other TEXT', 'city TEXT', 'level_override TEXT']) {
     try {
       await client.query(`ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS ${col}`);
     } catch (err) {

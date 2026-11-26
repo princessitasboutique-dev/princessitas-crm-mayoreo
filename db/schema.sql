@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS crm_clients (
   last_message_date DATE,
   next_followup_date DATE,
   notes TEXT,
+  -- Nivel fijado a mano (NULL = automático, calculado del historial de
+  -- compras: Top / Constante / Esporádico / Ocasional / Nuevo).
+  level_override TEXT
+    CHECK (level_override IS NULL OR level_override IN ('top', 'constante', 'esporadico', 'ocasional', 'nuevo')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
