@@ -311,14 +311,16 @@ async function main() {
     r = await req(`/api/clients/${solId}/messages`, { method: 'POST', headers: H58, body: { text: 'Hola' } });
     check('POST mensaje a cliente de otra sucursal -> 404', r.status === 404, JSON.stringify(r.json));
 
-    // 9. Registrar compras: actualizan última compra y total acumulado
-    r = await req(`/api/clients/${lunaId}/purchases`, { method: 'POST', headers: H58, body: { date: '2026-11-20', description: '10 ropones desmontables', amount: 8500 } });
+    // 9. Registrar compras: actualizan última compra y total acumulado.
+    // Los montos se leen con el PIN de administración (HADMIN): la vista
+    // de sucursal ya no los recibe (ocultos desde 2026-11-26).
+    r = await req(`/api/clients/${lunaId}/purchases`, { method: 'POST', headers: HADMIN, body: { date: '2026-11-20', description: '10 ropones desmontables', amount: 8500 } });
     check('POST compra $8,500 -> 201', r.status === 201 && r.json?.purchase?.amount === 8500, JSON.stringify(r.json));
-    r = await req(`/api/clients/${lunaId}`, { headers: H58 });
+    r = await req(`/api/clients/${lunaId}`, { headers: HADMIN });
     check('Ficha tras 1a compra -> última compra y total $8,500', r.json?.client?.total_purchased === 8500 && r.json?.client?.last_purchase_description === '10 ropones desmontables' && r.json?.client?.last_purchase_amount === 8500, JSON.stringify(r.json?.client));
     r = await req(`/api/clients/${lunaId}/purchases`, { method: 'POST', headers: H58, body: { date: '2026-11-25', description: '5 crinolinas', amount: 1200 } });
     check('POST compra $1,200 -> 201', r.status === 201, JSON.stringify(r.json));
-    r = await req(`/api/clients/${lunaId}`, { headers: H58 });
+    r = await req(`/api/clients/${lunaId}`, { headers: HADMIN });
     check('Ficha tras 2a compra -> total $9,700 y última compra es la más reciente', r.json?.client?.total_purchased === 9700 && r.json?.client?.last_purchase_description === '5 crinolinas', JSON.stringify(r.json?.client));
     r = await req(`/api/clients/${lunaId}/purchases`, { method: 'POST', headers: H58, body: { description: 'Sin monto', amount: 0 } });
     check('POST compra $0 -> 400', r.status === 400, JSON.stringify(r.json));
@@ -605,11 +607,11 @@ async function main() {
     r = await req(`/api/clients/${bajaId}/purchases`, { method: 'POST', headers: H58, body: { date: '2026-11-20', description: 'Venta 2 · 4 artículo(s): 4 vestidos', amount: 3000 } });
     check('POST compra $3,000 -> 201', r.status === 201, JSON.stringify(r.json));
     const compraId = r.json?.purchase?.id;
-    r = await req(`/api/clients/${bajaId}`, { headers: H58 });
+    r = await req(`/api/clients/${bajaId}`, { headers: HADMIN });
     check('Ficha con 2 compras -> total $8,000 y última compra es la de $3,000', r.json?.client?.total_purchased === 8000 && r.json?.client?.last_purchase_description === 'Venta 2 · 4 artículo(s): 4 vestidos', JSON.stringify(r.json?.client));
-    r = await req(`/api/clients/${bajaId}/purchases/${abonoId}`, { method: 'DELETE', headers: H58 });
+    r = await req(`/api/clients/${bajaId}/purchases/${abonoId}`, { method: 'DELETE', headers: HADMIN });
     check('DELETE abono -> 200 y devuelve la compra borrada', r.status === 200 && r.json?.purchase?.id === abonoId && r.json?.purchase?.amount === 5000, JSON.stringify(r.json));
-    r = await req(`/api/clients/${bajaId}`, { headers: H58 });
+    r = await req(`/api/clients/${bajaId}`, { headers: HADMIN });
     check('Ficha tras borrar abono -> total $3,000 y última compra sin cambio', r.json?.client?.total_purchased === 3000 && r.json?.client?.last_purchase_description === 'Venta 2 · 4 artículo(s): 4 vestidos' && r.json?.client?.last_purchase_amount === 3000, JSON.stringify(r.json?.client));
     r = await req(`/api/clients/${bajaId}/purchases/${abonoId}`, { method: 'DELETE', headers: H58 });
     check('DELETE compra ya borrada -> 404', r.status === 404, JSON.stringify(r.json));
@@ -621,10 +623,42 @@ async function main() {
     check('DELETE compra sin alcance -> 400', r.status === 400, JSON.stringify(r.json));
     r = await req(`/api/clients/${bajaId}/purchases/${compraId}`, { method: 'DELETE', headers: H58 });
     check('DELETE última compra -> 200', r.status === 200, JSON.stringify(r.json));
-    r = await req(`/api/clients/${bajaId}`, { headers: H58 });
+    r = await req(`/api/clients/${bajaId}`, { headers: HADMIN });
     check('Ficha sin compras -> total 0 y última compra en null', r.json?.client?.total_purchased === 0 && r.json?.client?.last_purchase_date === null && r.json?.client?.last_purchase_description === null, JSON.stringify(r.json?.client));
     r = await req('/api/clients/99999/purchases/1', { method: 'DELETE', headers: H58 });
     check('DELETE compra de cliente inexistente -> 404', r.status === 404, JSON.stringify(r.json));
+
+    // 18. Montos ocultos para sucursal: la vista de sucursal (x-branch)
+    // no recibe montos (total, última compra, historial); con el PIN de
+    // administración salen completos. El nivel sí se ve en ambos casos.
+    console.log('Montos ocultos para sucursal');
+    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Boutique Montos', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('POST cliente para montos ocultos -> 201', r.status === 201, JSON.stringify(r.json));
+    const montosId = r.json?.client?.id;
+    r = await req(`/api/clients/${montosId}/purchases`, { method: 'POST', headers: HADMIN, body: { date: '2026-11-20', description: 'Venta 1 · 2 artículo(s): 2 ropones', amount: 4000 } });
+    check('POST compra $4,000 con admin -> 201 y monto visible', r.status === 201 && r.json?.purchase?.amount === 4000, JSON.stringify(r.json));
+    r = await req(`/api/clients/${montosId}`, { method: 'PUT', headers: H58, body: { next_followup_date: '2026-11-27' } });
+    check('PUT próxima fecha con sucursal -> 200', r.status === 200, JSON.stringify(r.json));
+    r = await req('/api/clients', { headers: H58 });
+    const montos58 = (r.json?.clients || []).find((c) => c.id === montosId);
+    check('Lista con sucursal -> total y última compra en null, nivel visible', montos58 && montos58.total_purchased === null && montos58.last_purchase_amount === null && montos58.level === 'nuevo' && montos58.last_purchase_description === 'Venta 1 · 2 artículo(s): 2 ropones', JSON.stringify(montos58));
+    r = await req('/api/clients', { headers: HADMIN });
+    const montosAdmin = (r.json?.clients || []).find((c) => c.id === montosId);
+    check('Lista con admin -> total $4,000 visible', montosAdmin && montosAdmin.total_purchased === 4000 && montosAdmin.last_purchase_amount === 4000, JSON.stringify(montosAdmin));
+    r = await req(`/api/clients/${montosId}`, { headers: H58 });
+    check('Ficha con sucursal -> montos en null, descripción visible', r.json?.client?.total_purchased === null && r.json?.client?.last_purchase_amount === null && r.json?.purchases?.[0]?.amount === null && r.json?.purchases?.[0]?.description === 'Venta 1 · 2 artículo(s): 2 ropones', JSON.stringify(r.json));
+    r = await req(`/api/clients/${montosId}`, { headers: HADMIN });
+    check('Ficha con admin -> montos visibles', r.json?.client?.total_purchased === 4000 && r.json?.purchases?.[0]?.amount === 4000, JSON.stringify(r.json));
+    r = await req(`/api/clients/${montosId}/purchases`, { method: 'POST', headers: H58, body: { date: '2026-11-21', description: 'Venta 2 · 1 artículo(s): 1 ropón', amount: 1000 } });
+    check('POST compra con sucursal -> 201 pero monto en null en la respuesta', r.status === 201 && r.json?.purchase?.amount === null && r.json?.purchase?.id, JSON.stringify(r.json));
+    r = await req(`/api/clients/${montosId}`, { headers: HADMIN });
+    check('Ficha con admin tras 2a compra -> total $5,000', r.json?.client?.total_purchased === 5000, JSON.stringify(r.json?.client));
+    r = await req('/api/followups', { headers: H58 });
+    const fup58 = (r.json?.followups || []).find((c) => c.id === montosId);
+    check('Seguimientos con sucursal -> total en null, nivel visible', fup58 && fup58.total_purchased === null && fup58.level === 'esporadico', JSON.stringify(fup58));
+    r = await req('/api/followups', { headers: HADMIN });
+    const fupAdmin = (r.json?.followups || []).find((c) => c.id === montosId);
+    check('Seguimientos con admin -> total $5,000 visible', fupAdmin && fupAdmin.total_purchased === 5000, JSON.stringify(fupAdmin));
   } finally {
     server.close();
     await pool.end().catch(() => {});
