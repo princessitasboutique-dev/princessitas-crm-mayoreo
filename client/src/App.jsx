@@ -86,13 +86,13 @@ function ClientCard({ client, onOpen }) {
         <span>📍 {client.branch}</span>
         {client.city && <span>🏙️ {client.city}</span>}
         <span>📦 {carrierLabel(client)}</span>
-        <span>💰 Total: <b>{fmtMoney(client.total_purchased)}</b></span>
+        {client.total_purchased != null && <span>💰 Total: <b>{fmtMoney(client.total_purchased)}</b></span>}
       </div>
       <div className="client-lines">
         <div>
           <b>Última compra:</b>{' '}
           {client.last_purchase_date
-            ? `${fmtDate(client.last_purchase_date)} · ${client.last_purchase_description} · ${fmtMoney(client.last_purchase_amount)}`
+            ? [fmtDate(client.last_purchase_date), client.last_purchase_description, client.last_purchase_amount != null ? fmtMoney(client.last_purchase_amount) : null].filter(Boolean).join(' · ')
             : 'sin compras registradas'}
         </div>
         <div>
@@ -417,7 +417,10 @@ export default function App() {
   const todayCount = followups.filter((c) => c.followup_status === 'hoy').length;
   // La lista de Clientes se ordena según el control "Ordenar por"
   // (por defecto, por nivel: Top, Constante, Esporádico, Ocasional, Nuevo).
-  const sortedClients = sortClients(clients, sortBy);
+  // En vista de sucursal no existe ordenar por total (los montos están
+  // ocultos): si el dispositivo tenía guardado ese orden, cae a Nivel.
+  const activeSort = (!adminMode && sortBy === 'total') ? DEFAULT_SORT : sortBy;
+  const sortedClients = sortClients(clients, activeSort);
   const groups = [
     { key: 'vencido', title: `Vencidos (${overdueCount})`, items: followups.filter((c) => c.followup_status === 'vencido') },
     { key: 'hoy', title: `Hoy (${todayCount})`, items: followups.filter((c) => c.followup_status === 'hoy') },
@@ -531,8 +534,8 @@ export default function App() {
                     {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                   </select>
                   <label>Ordenar por
-                    <select value={sortBy} onChange={(e) => chooseSort(e.target.value)}>
-                      {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    <select value={activeSort} onChange={(e) => chooseSort(e.target.value)}>
+                      {SORT_OPTIONS.filter((o) => adminMode || o.value !== 'total').map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                   </label>
                 </div>
@@ -633,7 +636,7 @@ export default function App() {
           <h2>{detail.client.name}</h2>
           <p className="muted">
             {[detail.client.phone, detail.client.city, detail.client.branch, carrierLabel(detail.client), statusLabel(detail.client.status)].filter(Boolean).join(' · ')}
-            {' · '}Total comprado: <b>{fmtMoney(detail.client.total_purchased)}</b>
+            {detail.client.total_purchased != null && (<>{' · '}Total comprado: <b>{fmtMoney(detail.client.total_purchased)}</b></>)}
             {' · '}Nivel: <span className={`badge level-${detail.client.level || 'nuevo'}`}>{levelLabel(detail.client.level)}</span>
             {detail.client.level_override && <span className="muted"> (fijado a mano)</span>}
           </p>
@@ -719,6 +722,9 @@ export default function App() {
             <button type="submit">Guardar mensaje</button>
           </form>
 
+          {/* Registrar compra solo lo ve administración: las compras llegan
+              con la carga semanal del reporte (nadie las registra a mano). */}
+          {adminMode && (
           <form className="card" onSubmit={addPurchase}>
             <h3>Registrar compra</h3>
             <div className="grid2">
@@ -735,6 +741,7 @@ export default function App() {
             <input required value={purForm.description} onChange={(e) => setPurForm({ ...purForm, description: e.target.value })} placeholder="Ej. 10 ropones desmontables" />
             <button type="submit">Guardar compra</button>
           </form>
+          )}
 
           <div className="card">
             <h3>Historial de mensajes</h3>
@@ -751,7 +758,7 @@ export default function App() {
             {detail.purchases.length === 0 && <p className="muted">Sin compras registradas.</p>}
             {detail.purchases.map((p) => (
               <div key={p.id} className="history-row">
-                <b>{fmtDate(p.date)}</b> — {p.description} · <b>{fmtMoney(p.amount)}</b>
+                <b>{fmtDate(p.date)}</b> — {p.description}{p.amount != null && (<> · <b>{fmtMoney(p.amount)}</b></>)}
               </div>
             ))}
           </div>
