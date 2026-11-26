@@ -9,6 +9,7 @@ const { newDb } = require('pg-mem');
 const bcrypt = require('bcrypt');
 const { createApp } = require('../src/app.js');
 const { ensureSchema, seed } = require('../db/seed.js');
+import { sortClients, LEVEL_ORDER, SORT_OPTIONS, DEFAULT_SORT } from '../client/src/sortClients.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -531,6 +532,64 @@ async function main() {
     check('GET lista: clientes sin teléfono aparecen sin whatsapp_url', r.status === 200 && (r.json?.clients || []).length === 2 && r.json.clients.every((x) => x.phone === null && x.whatsapp_url === null), JSON.stringify(r.json?.clients));
     r = await req(`/api/clients/${sinTel2Id}`, { headers: H58 });
     check('GET ficha de cliente sin teléfono -> 200, phone null, sin whatsapp_url', r.status === 200 && r.json?.client?.phone === null && r.json?.client?.whatsapp_url === null, JSON.stringify(r.json));
+
+    // 16. Ordenamiento de clientes (módulo del cliente, sin servidor):
+    // por nivel en el orden que pidió Ulises, por total, por última
+    // compra y por nombre; el orden por defecto es Nivel.
+    console.log('Ordenamiento de clientes');
+    const nombres = (arr) => arr.map((c) => c.name).join('|');
+    check('LEVEL_ORDER es Top, Constante, Esporádico, Ocasional, Nuevo',
+      JSON.stringify(LEVEL_ORDER) === JSON.stringify(['top', 'constante', 'esporadico', 'ocasional', 'nuevo']),
+      JSON.stringify(LEVEL_ORDER));
+    check('Orden por defecto es Nivel (primera opción)',
+      DEFAULT_SORT === 'level' && SORT_OPTIONS[0].value === 'level' &&
+      JSON.stringify(SORT_OPTIONS.map((o) => o.value)) === JSON.stringify(['level', 'name', 'total', 'lastPurchase']),
+      JSON.stringify(SORT_OPTIONS.map((o) => o.value)));
+    const mezcla = [
+      { name: 'Beto', level: 'nuevo' },
+      { name: 'Ana', level: 'top' },
+      { name: 'Celia', level: 'ocasional' },
+      { name: 'David', level: 'constante' },
+      { name: 'Elena', level: 'esporadico' },
+      { name: 'Bruno', level: 'top' },
+      { name: 'Zoe', level: 'rara' },
+      { name: 'Yara' },
+    ];
+    check('Orden por nivel: Top, Constante, Esporádico, Ocasional, Nuevo; desempate por nombre; nivel desconocido o sin nivel al final',
+      nombres(sortClients(mezcla, 'level')) === 'Ana|Bruno|David|Elena|Celia|Beto|Yara|Zoe',
+      nombres(sortClients(mezcla, 'level')));
+    const porTotal = [
+      { name: 'Beto', total_purchased: 100 },
+      { name: 'Ana', total_purchased: 500 },
+      { name: 'Celia', total_purchased: 500 },
+      { name: 'David', total_purchased: null },
+      { name: 'Elena', total_purchased: 0 },
+    ];
+    check('Orden por total: mayor a menor, desempate por nombre, null vale 0',
+      nombres(sortClients(porTotal, 'total')) === 'Ana|Celia|Beto|David|Elena',
+      nombres(sortClients(porTotal, 'total')));
+    const porFecha = [
+      { name: 'Beto', last_purchase_date: '2026-01-05' },
+      { name: 'Ana', last_purchase_date: '2026-11-20' },
+      { name: 'Celia', last_purchase_date: null },
+      { name: 'David', last_purchase_date: '2026-11-20' },
+      { name: 'Elena', last_purchase_date: '' },
+    ];
+    check('Orden por última compra: más reciente primero, desempate por nombre, sin compra al final',
+      nombres(sortClients(porFecha, 'lastPurchase')) === 'Ana|David|Beto|Celia|Elena',
+      nombres(sortClients(porFecha, 'lastPurchase')));
+    check('Orden por nombre: A–Z',
+      nombres(sortClients([{ name: 'Zoe' }, { name: 'ana' }, { name: 'Beto' }], 'name')) === 'ana|Beto|Zoe',
+      nombres(sortClients([{ name: 'Zoe' }, { name: 'ana' }, { name: 'Beto' }], 'name')));
+    check('Valor de orden desconocido -> cae al orden por defecto (Nivel)',
+      nombres(sortClients(mezcla, 'inexistente')) === 'Ana|Bruno|David|Elena|Celia|Beto|Yara|Zoe',
+      nombres(sortClients(mezcla, 'inexistente')));
+    const entrada = [{ name: 'Zoe', level: 'nuevo' }, { name: 'Ana', level: 'top' }];
+    const antes = JSON.stringify(entrada);
+    sortClients(entrada, 'level');
+    check('sortClients no muta el arreglo original', JSON.stringify(entrada) === antes);
+    check('sortClients con lista vacía o nula -> []',
+      sortClients([], 'level').length === 0 && sortClients(null, 'level').length === 0);
   } finally {
     server.close();
     await pool.end().catch(() => {});
