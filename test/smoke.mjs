@@ -103,6 +103,16 @@ VALUES ('Cliente Viejo', '3300000000', 'Medrano 58', 'Paquetexpress', 'activo');
   }
   const cols = await columns();
   check('v1: tras ensureSchema existen carrier_other, city y level_override', cols.includes('carrier_other') && cols.includes('city') && cols.includes('level_override'), cols.join(','));
+  // pg-mem no actualiza information_schema.is_nullable tras DROP NOT NULL
+  // (comprobado con un probe: el ALTER sí aplica y el INSERT con NULL
+  // pasa), así que se verifica por comportamiento: insertar NULL directo.
+  let phoneNullOk = false;
+  try {
+    await pool.query("INSERT INTO crm_clients (name, phone, branch, carrier, status) VALUES ('Prueba NULL', NULL, 'Medrano 58', 'Paquetexpress', 'nuevo')");
+    phoneNullOk = true;
+  } catch { /* sigue NOT NULL */ }
+  check('v1: tras ensureSchema phone acepta NULL (INSERT directo)', phoneNullOk);
+  await pool.query("DELETE FROM crm_clients WHERE name = 'Prueba NULL'");
   const old = await pool.query('SELECT COUNT(*)::int AS c FROM crm_clients WHERE name = $1', ['Cliente Viejo']);
   check('v1: el cliente guardado con el esquema viejo sigue ahí', old.rows[0].c === 1);
 
@@ -124,6 +134,8 @@ VALUES ('Cliente Viejo', '3300000000', 'Medrano 58', 'Paquetexpress', 'activo');
   try {
     let r = await req('/api/clients', { method: 'POST', headers: { 'x-branch': 'Medrano 58' }, body: { name: 'Clara Esthela', phone: '331767 8012', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
     check('v1: POST /api/clients (Clara Esthela) -> 201', r.status === 201 && r.json?.client?.name === 'Clara Esthela', JSON.stringify(r.json));
+    r = await req('/api/clients', { method: 'POST', headers: { 'x-branch': 'Medrano 58' }, body: { name: 'Cliente V1 Sin Teléfono', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('v1: POST /api/clients sin teléfono -> 201, phone null', r.status === 201 && r.json?.client?.phone === null && r.json?.client?.whatsapp_url === null, JSON.stringify(r.json));
     r = await req('/api/clients?search=clara', { headers: { 'x-branch': 'Medrano 58' } });
     check('v1: GET /api/clients?search=clara -> 200 y la encuentra', r.status === 200 && r.json?.clients?.length === 1 && r.json.clients[0].name === 'Clara Esthela', JSON.stringify(r.json));
     // Idempotencia: correr ensureSchema otra vez no rompe nada.
@@ -157,6 +169,17 @@ async function main() {
   const H58 = { 'x-branch': 'Medrano 58' };
   const HZ = { 'x-branch': 'Zapotlanejo' };
   const HADMIN = { 'x-admin-pin': '1234' };
+
+  // Fechas relativas al día de hoy (México) para que la prueba no caduque
+  // al cambiar de día: los seguimientos usan mañana y 25 días después.
+  function relDate(n) {
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const d = new Date(`${today}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
 
   async function req(path, opts = {}) {
     const res = await fetch(base + path, {
@@ -198,8 +221,14 @@ async function main() {
     // 3. Validaciones al crear cliente
     r = await req('/api/clients', { method: 'POST', headers: H58, body: { phone: '3311112222' } });
     check('POST /api/clients sin nombre -> 400', r.status === 400 && /nombre/.test(r.json?.error || ''), JSON.stringify(r.json));
-    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Boutique Luna' } });
-    check('POST /api/clients sin teléfono -> 400', r.status === 400 && /teléfono/.test(r.json?.error || ''), JSON.stringify(r.json));
+    // El teléfono es opcional: se puede crear un cliente solo con nombre.
+    // Se borra enseguida para no afectar los conteos de las secciones
+    // siguientes (la cobertura completa está en la sección 15).
+    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Cliente Sin Teléfono', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('POST /api/clients sin teléfono -> 201, phone null, sin whatsapp_url', r.status === 201 && r.json?.client?.phone === null && r.json?.client?.whatsapp_url === null, JSON.stringify(r.json));
+    const sinTelId = r.json?.client?.id;
+    r = await req(`/api/clients/${sinTelId}`, { method: 'DELETE', headers: HADMIN });
+    check('DELETE cliente sin teléfono (limpieza) -> 200', r.status === 200, JSON.stringify(r.json));
     r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Boutique Luna', phone: '3311112222', branch: 'Medrano 99' } });
     check('POST /api/clients sucursal inválida -> 400', r.status === 400, JSON.stringify(r.json));
     r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Boutique Luna', phone: '3311112222', carrier: 'DHL' } });
@@ -298,8 +327,8 @@ async function main() {
     check('POST compra a cliente inexistente -> 404', r.status === 404, JSON.stringify(r.json));
 
     // 10. Editar cliente (PUT parcial): ciudad, paquetería Otra y alcance
-    r = await req(`/api/clients/${lunaId}`, { method: 'PUT', headers: H58, body: { status: 'activo', next_followup_date: '2026-11-26', city: 'Tlaquepaque' } });
-    check('PUT cliente -> 200, estado, seguimiento y ciudad actualizados', r.status === 200 && r.json?.client?.status === 'activo' && r.json?.client?.next_followup_date === '2026-11-26' && r.json?.client?.city === 'Tlaquepaque' && r.json?.client?.name === 'Boutique Luna', JSON.stringify(r.json));
+    r = await req(`/api/clients/${lunaId}`, { method: 'PUT', headers: H58, body: { status: 'activo', next_followup_date: relDate(1), city: 'Tlaquepaque' } });
+    check('PUT cliente -> 200, estado, seguimiento y ciudad actualizados', r.status === 200 && r.json?.client?.status === 'activo' && r.json?.client?.next_followup_date === relDate(1) && r.json?.client?.city === 'Tlaquepaque' && r.json?.client?.name === 'Boutique Luna', JSON.stringify(r.json));
     r = await req(`/api/clients/${lunaId}`, { method: 'PUT', headers: H58, body: { branch: 'Mal' } });
     check('PUT sucursal inválida -> 400', r.status === 400, JSON.stringify(r.json));
     r = await req(`/api/clients/${solId}`, { method: 'PUT', headers: H58, body: { status: 'activo' } });
@@ -315,8 +344,8 @@ async function main() {
     r = await req(`/api/clients/${marId}`, { method: 'PUT', headers: HADMIN, body: { carrier: 'Otra', carrier_other: 'Paquete Express' } });
     check('PUT paquetería a Otra con nombre -> 200 y carrier_display actualizado', r.status === 200 && r.json?.client?.carrier_display === 'Paquete Express', JSON.stringify(r.json));
 
-    // 11. Seguimientos: vencido (Sol, 2026-11-20), hoy y próximos
-    // Hoy en México es 2026-11-25; Luna quedó para 2026-11-26 (próximo).
+    // 11. Seguimientos: vencido (Sol, 2026-11-20), hoy y próximos.
+    // Luna quedó para mañana (próximo).
     r = await req('/api/followups', { headers: HADMIN });
     let fups = r.json?.followups || [];
     let sol = fups.find((c) => c.id === solId);
@@ -328,7 +357,7 @@ async function main() {
     r = await req('/api/followups', { headers: HZ });
     check('GET /api/followups (Zapotlanejo) -> solo Sol', r.status === 200 && (r.json?.followups || []).length === 1 && r.json.followups[0].id === solId, JSON.stringify(r.json?.followups));
     // Cliente con seguimiento a más de 7 días no aparece.
-    await req(`/api/clients/${lunaId}`, { method: 'PUT', headers: H58, body: { next_followup_date: '2026-12-20' } });
+    await req(`/api/clients/${lunaId}`, { method: 'PUT', headers: H58, body: { next_followup_date: relDate(25) } });
     r = await req('/api/followups', { headers: HADMIN });
     check('Seguimiento a 25 días -> ya no aparece en /api/followups', !(r.json?.followups || []).some((c) => c.id === lunaId), JSON.stringify(r.json?.followups));
     await req(`/api/clients/${lunaId}`, { method: 'PUT', headers: H58, body: { next_followup_date: null } });
@@ -476,6 +505,32 @@ async function main() {
     r = await req('/api/followups', { headers: HADMIN });
     const fTop = (r.json?.followups || []).find((x) => x.id === topConstId);
     check('Seguimientos: el cliente trae level top y seguimiento hoy', fTop?.level === 'top' && fTop?.followup_status === 'hoy', JSON.stringify(fTop));
+
+    // 15. Teléfono opcional: crear sin teléfono, quitarlo con PUT, y la
+    // lista y la ficha de un cliente sin teléfono no dan error ni traen
+    // whatsapp_url. El nombre sigue siendo obligatorio.
+    console.log('Teléfono opcional');
+    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Sin Teléfono Uno', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('POST cliente sin campo teléfono -> 201, phone null, sin whatsapp_url', r.status === 201 && r.json?.client?.phone === null && r.json?.client?.whatsapp_url === null, JSON.stringify(r.json));
+    const sinTel1Id = r.json?.client?.id;
+    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Sin Teléfono Dos', phone: '', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('POST cliente con teléfono vacío -> 201, phone null', r.status === 201 && r.json?.client?.phone === null, JSON.stringify(r.json));
+    const sinTel2Id = r.json?.client?.id;
+    r = await req('/api/clients', { method: 'POST', headers: H58, body: { name: 'Con Teléfono', phone: '3399998888', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('POST cliente con teléfono -> 201, whatsapp_url presente', r.status === 201 && r.json?.client?.phone === '3399998888' && r.json?.client?.whatsapp_url === 'https://wa.me/523399998888', JSON.stringify(r.json));
+    const conTelId = r.json?.client?.id;
+    r = await req(`/api/clients/${conTelId}`, { method: 'PUT', headers: H58, body: { phone: '' } });
+    check('PUT quitar el teléfono -> 200, phone null, sin whatsapp_url', r.status === 200 && r.json?.client?.phone === null && r.json?.client?.whatsapp_url === null, JSON.stringify(r.json));
+    r = await req(`/api/clients/${sinTel1Id}`, { method: 'PUT', headers: H58, body: { name: '' } });
+    check('PUT nombre vacío -> 400 (el nombre sigue siendo obligatorio)', r.status === 400, JSON.stringify(r.json));
+    r = await req(`/api/clients/${sinTel1Id}`, { method: 'PUT', headers: H58, body: { phone: '3312345678' } });
+    check('PUT poner teléfono a un cliente sin teléfono -> 200, whatsapp_url presente', r.status === 200 && r.json?.client?.phone === '3312345678' && r.json?.client?.whatsapp_url === 'https://wa.me/523312345678', JSON.stringify(r.json));
+    r = await req(`/api/clients/${sinTel1Id}`, { method: 'PUT', headers: H58, body: { phone: '' } });
+    check('PUT volver a quitar el teléfono -> 200, phone null', r.status === 200 && r.json?.client?.phone === null, JSON.stringify(r.json));
+    r = await req('/api/clients?search=sin teléfono', { headers: H58 });
+    check('GET lista: clientes sin teléfono aparecen sin whatsapp_url', r.status === 200 && (r.json?.clients || []).length === 2 && r.json.clients.every((x) => x.phone === null && x.whatsapp_url === null), JSON.stringify(r.json?.clients));
+    r = await req(`/api/clients/${sinTel2Id}`, { headers: H58 });
+    check('GET ficha de cliente sin teléfono -> 200, phone null, sin whatsapp_url', r.status === 200 && r.json?.client?.phone === null && r.json?.client?.whatsapp_url === null, JSON.stringify(r.json));
   } finally {
     server.close();
     await pool.end().catch(() => {});
