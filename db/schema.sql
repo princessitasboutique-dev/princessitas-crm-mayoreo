@@ -7,7 +7,9 @@
 CREATE TABLE IF NOT EXISTS crm_clients (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
-  phone TEXT NOT NULL,
+  -- El teléfono es opcional: hay clientes del reporte de ventas solo con
+  -- nombre. Sin teléfono no hay botón de WhatsApp.
+  phone TEXT,
   branch TEXT NOT NULL DEFAULT 'Otra'
     CHECK (branch IN ('Medrano 58', 'Medrano 60', 'Zapotlanejo', 'Otra')),
   carrier TEXT NOT NULL DEFAULT 'Otra'

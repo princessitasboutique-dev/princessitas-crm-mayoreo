@@ -19,7 +19,8 @@ async function ensureSchema(client) {
   await client.query(sql);
 }
 
-// Agrega carrier_other, city y level_override a crm_clients si faltan.
+// Agrega carrier_other, city y level_override a crm_clients si faltan,
+// y quita el NOT NULL de phone (el teléfono pasó a ser opcional).
 // Idempotente: si la columna ya existe se ignora el error, y si la tabla
 // aún no existe (base nueva: la crea schema.sql después, ya con las
 // columnas) también se ignora. Cualquier otro error sí se propaga.
@@ -30,6 +31,13 @@ async function addMissingColumns(client) {
     } catch (err) {
       if (!/already exists|duplicate|does not exist/i.test(err.message)) throw err;
     }
+  }
+  // En una base ya migrada es un no-op; en una base nueva la tabla aún no
+  // existe y el error se ignora (schema.sql la crea ya con phone nullable).
+  try {
+    await client.query('ALTER TABLE crm_clients ALTER COLUMN phone DROP NOT NULL');
+  } catch (err) {
+    if (!/does not exist/i.test(err.message)) throw err;
   }
 }
 
