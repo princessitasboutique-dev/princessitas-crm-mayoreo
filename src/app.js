@@ -580,6 +580,59 @@ function createApp(pool) {
     } catch (err) { next(err); }
   });
 
+  // DELETE /api/clients/:id/purchases/:purchaseId — elimina una compra y
+  // recalcula la última compra del cliente y su total comprado acumulado.
+  // Sirve para quitar del CRM los "Abono a crédito" que el reporte anual
+  // mezcla con las ventas y que duplican el ingreso: son cobros, no
+  // mercancía, así que no deben contar en el total ni en el nivel.
+  app.delete('/api/clients/:id/purchases/:purchaseId', async (req, res, next) => {
+    try {
+      const id = parseClientId(req, res);
+      if (!id) return;
+      const purchaseId = parseInt(req.params.purchaseId, 10);
+      if (!purchaseId) {
+        return res.status(400).json({ ok: false, error: 'ID de compra inválido.' });
+      }
+      const scope = await resolveScope(req, res);
+      if (scope === undefined) return; // 401 ya respondido
+      if (!scope) {
+        return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
+      const client = await getClient(id);
+      if (!client || !scopeAllows(scope, client.branch)) return res.status(404).json({ ok: false, error: 'Cliente no encontrado.' });
+      const existing = await pool.query(
+        'SELECT * FROM crm_purchases WHERE id = $1 AND client_id = $2',
+        [purchaseId, id]
+      );
+      if (!existing.rows.length) return res.status(404).json({ ok: false, error: 'Compra no encontrada.' });
+      const deleted = existing.rows[0];
+      await pool.query('DELETE FROM crm_purchases WHERE id = $1', [purchaseId]);
+      // La última compra es la de fecha más reciente (desempate: la última
+      // registrada); si ya no quedan compras, los campos quedan en NULL y
+      // el total en 0.
+      const last = await pool.query(
+        `SELECT * FROM crm_purchases WHERE client_id = $1
+         ORDER BY date DESC, id DESC LIMIT 1`,
+        [id]
+      );
+      const total = await pool.query(
+        'SELECT COALESCE(SUM(amount),0) AS total FROM crm_purchases WHERE client_id = $1',
+        [id]
+      );
+      await pool.query(
+        `UPDATE crm_clients
+         SET last_purchase_date = $1, last_purchase_description = $2,
+             last_purchase_amount = $3, total_purchased = $4, updated_at = now()
+         WHERE id = $5`,
+        [last.rows.length ? toISODate(last.rows[0].date) : null,
+         last.rows.length ? last.rows[0].description : null,
+         last.rows.length ? money(last.rows[0].amount) : null,
+         money(total.rows[0].total), id]
+      );
+      return res.json({ ok: true, purchase: normPurchase(deleted) });
+    } catch (err) { next(err); }
+  });
+
   // GET /api/followups — clientes con próxima fecha de seguimiento vencida
   // o de hoy, y los próximos 7 días. Orden: vencidos primero, luego hoy,
   // luego próximos. Cada cliente lleva followup_status.
