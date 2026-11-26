@@ -323,9 +323,10 @@ function createApp(pool) {
     try {
       const b = req.body || {};
       const name = String(b.name || '').trim();
-      const phone = String(b.phone || '').trim();
+      // El teléfono es opcional (hay clientes del reporte de ventas solo
+      // con nombre): ausente o vacío -> NULL, sin botón de WhatsApp.
+      const phone = String(b.phone || '').trim() || null;
       if (!name) return res.status(400).json({ ok: false, error: 'Falta el nombre del cliente.' });
-      if (!phone) return res.status(400).json({ ok: false, error: 'Falta el teléfono del cliente.' });
       const branch = b.branch || 'Otra';
       const carrier = b.carrier || 'Otra';
       const status = b.status || 'nuevo';
@@ -423,9 +424,13 @@ function createApp(pool) {
       for (const f of CLIENT_FIELDS) {
         if (b[f] === undefined) continue;
         let v = b[f];
-        if (f === 'name' || f === 'phone') {
+        if (f === 'name') {
           v = String(v || '').trim();
-          if (!v) return res.status(400).json({ ok: false, error: `El campo ${f} no puede quedar vacío.` });
+          if (!v) return res.status(400).json({ ok: false, error: 'El campo name no puede quedar vacío.' });
+        }
+        if (f === 'phone') {
+          // El teléfono es opcional: vacío -> NULL (se quita el teléfono).
+          v = String(v || '').trim() || null;
         }
         if (f === 'branch' && !BRANCHES.includes(v)) {
           return res.status(400).json({ ok: false, error: 'Sucursal no válida.' });
