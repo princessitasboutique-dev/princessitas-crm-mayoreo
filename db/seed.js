@@ -6,17 +6,29 @@ const fs = require('fs');
 const path = require('path');
 
 async function ensureSchema(client) {
+  // Migración para bases que ya existen (la de producción en Neon): agrega
+  // las columnas nuevas si faltan. Se aplica ANTES de schema.sql porque
+  // schema.sql crea un índice sobre city: si la columna aún no existe, ese
+  // CREATE INDEX falla, la consulta multi-sentencia se aborta y las
+  // migraciones que iban después nunca corrían. La base en vivo se quedaba
+  // sin carrier_other ni city y POST /api/clients fallaba con 500
+  // ("Error interno del servidor."). Así, aunque schema.sql falle a medias,
+  // las columnas ya están agregadas. Idempotente y sin tocar los datos.
+  await addMissingColumns(client);
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await client.query(sql);
-  // Migración para bases que ya existen (la de producción en Neon): agrega
-  // las columnas nuevas si faltan. Idempotente; si la columna ya existe el
-  // error de duplicado se ignora. Así la base en vivo se actualiza sola al
-  // desplegar, sin tocar los datos.
+}
+
+// Agrega carrier_other y city a crm_clients si faltan. Idempotente: si la
+// columna ya existe se ignora el error, y si la tabla aún no existe (base
+// nueva: la crea schema.sql después, ya con las columnas) también se
+// ignora. Cualquier otro error sí se propaga.
+async function addMissingColumns(client) {
   for (const col of ['carrier_other TEXT', 'city TEXT']) {
     try {
       await client.query(`ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS ${col}`);
     } catch (err) {
-      if (!/already exists|duplicate/i.test(err.message)) throw err;
+      if (!/already exists|duplicate|does not exist/i.test(err.message)) throw err;
     }
   }
 }
