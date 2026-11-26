@@ -28,6 +28,12 @@ form.card, .card{background:#fff;border:1px solid #e8c9d4;border-radius:14px;pad
 .badge.late{background:#fde3df;color:#a12d1d}
 .badge.pending{background:#fff3cd;color:#7a5b00}
 .badge.info{background:#e3eefc;color:#14508a}
+.badges{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.badge.level-top{background:#8e2a55;color:#fff}
+.badge.level-constante{background:#dff2e3;color:#1d6b2f}
+.badge.level-esporadico{background:#e3eefc;color:#14508a}
+.badge.level-ocasional{background:#fff3cd;color:#7a5b00}
+.badge.level-nuevo{background:#f3e3ea;color:#8e2a55}
 .msg{padding:12px;border-radius:10px;margin:10px 0;font-weight:600}
 .msg.ok{background:#dff2e3;color:#1d6b2f}
 .msg.err{background:#fde3df;color:#a12d1d}

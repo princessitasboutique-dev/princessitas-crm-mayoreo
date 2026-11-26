@@ -23,6 +23,15 @@ const STATUSES = [
 ];
 const CHANNELS = ['WhatsApp', 'llamada', 'otro'];
 
+// Niveles de cliente (los calcula el servidor del historial de compras).
+const LEVELS = [
+  { value: 'top', label: 'Top' },
+  { value: 'constante', label: 'Constante' },
+  { value: 'esporadico', label: 'Esporádico' },
+  { value: 'ocasional', label: 'Ocasional' },
+  { value: 'nuevo', label: 'Nuevo' },
+];
+
 const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
 
 function todayMX() {
@@ -46,6 +55,10 @@ function statusLabel(s) {
   return (STATUSES.find((x) => x.value === s) || {}).label || s;
 }
 
+function levelLabel(l) {
+  return (LEVELS.find((x) => x.value === l) || {}).label || l;
+}
+
 function carrierLabel(c) {
   return c && c.carrier_display ? c.carrier_display : c.carrier;
 }
@@ -61,9 +74,12 @@ function ClientCard({ client, onOpen }) {
           <div className="name">{client.name}</div>
           <div className="muted">{client.phone}{client.city ? ` · ${client.city}` : ''}</div>
         </div>
-        <span className={`badge ${client.status === 'activo' ? 'ok' : client.status === 'nuevo' ? 'info' : 'pending'}`}>
-          {statusLabel(client.status)}
-        </span>
+        <div className="badges">
+          <span className={`badge level-${client.level || 'nuevo'}`}>{levelLabel(client.level)}</span>
+          <span className={`badge ${client.status === 'activo' ? 'ok' : client.status === 'nuevo' ? 'info' : 'pending'}`}>
+            {statusLabel(client.status)}
+          </span>
+        </div>
       </div>
       <div className="client-meta">
         <span>📍 {client.branch}</span>
@@ -151,6 +167,7 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [carrier, setCarrier] = useState('');
   const [status, setStatus] = useState('');
+  const [level, setLevel] = useState('');
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null); // {type:'ok'|'err', text}
   const [showNew, setShowNew] = useState(false);
@@ -181,6 +198,7 @@ export default function App() {
       if (adminMode && adminBranch) q.set('branch', adminBranch);
       if (carrier) q.set('carrier', carrier);
       if (status) q.set('status', status);
+      if (level) q.set('level', level);
       const data = await api(`/api/clients?${q.toString()}`);
       setClients(data.clients || []);
     } catch (e) {
@@ -188,7 +206,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [search, adminMode, adminBranch, carrier, status, myBranch]);
+  }, [search, adminMode, adminBranch, carrier, status, level, myBranch]);
 
   const loadFollowups = useCallback(async () => {
     if (!myBranch && !adminMode) return;
@@ -287,6 +305,7 @@ export default function App() {
         status: data.client.status,
         next_followup_date: data.client.next_followup_date || '',
         notes: data.client.notes || '',
+        level_override: data.client.level_override || '',
       });
       setMsgForm({ date: todayMX(), text: '', channel: 'WhatsApp' });
       setPurForm({ date: todayMX(), description: '', amount: '' });
@@ -479,6 +498,10 @@ export default function App() {
                       {BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}
                     </select>
                   )}
+                  <select value={level} onChange={(e) => setLevel(e.target.value)}>
+                    <option value="">Todos los niveles</option>
+                    {LEVELS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                  </select>
                   <select value={carrier} onChange={(e) => setCarrier(e.target.value)}>
                     <option value="">Todas las paqueterías</option>
                     {CARRIERS.map((c) => <option key={c} value={c}>{c}</option>)}
@@ -588,6 +611,8 @@ export default function App() {
             {detail.client.city ? ` · ${detail.client.city}` : ''}
             {' · '}{detail.client.branch} · {carrierLabel(detail.client)} · {statusLabel(detail.client.status)}
             {' · '}Total comprado: <b>{fmtMoney(detail.client.total_purchased)}</b>
+            {' · '}Nivel: <span className={`badge level-${detail.client.level || 'nuevo'}`}>{levelLabel(detail.client.level)}</span>
+            {detail.client.level_override && <span className="muted"> (fijado a mano)</span>}
           </p>
           {detail.client.whatsapp_url && (
             <div className="btnrow">
@@ -638,7 +663,15 @@ export default function App() {
                 <label>Próxima fecha de seguimiento</label>
                 <input type="date" value={editForm.next_followup_date} onChange={(e) => setEditForm({ ...editForm, next_followup_date: e.target.value })} />
               </div>
+              <div>
+                <label>Nivel</label>
+                <select value={editForm.level_override} onChange={(e) => setEditForm({ ...editForm, level_override: e.target.value })}>
+                  <option value="">Automático ({levelLabel(detail.client.level)})</option>
+                  {LEVELS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                </select>
+              </div>
             </div>
+            <p className="muted">El nivel se calcula solo de sus compras (últimos 365 días). Elige un nivel para fijarlo a mano; "Automático" vuelve al calculado.</p>
             <label>Notas</label>
             <textarea rows={2} value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} />
             <button type="submit">Guardar cambios</button>
