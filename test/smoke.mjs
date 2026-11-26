@@ -17,6 +17,127 @@ function check(name, cond, extra = '') {
   else { fail += 1; console.log(`  FAIL  ${name} ${extra}`); }
 }
 
+// 13. Migración desde esquema v1 (regresión del error 500 al guardar).
+// La base en vivo se creó con el esquema v1, cuya tabla crm_clients NO
+// tenía carrier_other ni city. ensureSchema debe agregar esas columnas al
+// arrancar aunque schema.sql falle a medias (antes, el CREATE INDEX sobre
+// city abortaba la consulta multi-sentencia y el bucle ALTER nunca corría,
+// así que POST /api/clients fallaba con 500 "Error interno del servidor.").
+async function testV1Migration() {
+  console.log('Migración v1 -> actual (pg-mem, sin base real)');
+  // Esquema v1: igual que schema.sql pero sin carrier_other, sin city y
+  // sin el índice sobre city, con un cliente ya guardado.
+  const V1_TABLES = `
+CREATE TABLE crm_clients (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  branch TEXT NOT NULL DEFAULT 'Otra'
+    CHECK (branch IN ('Medrano 58', 'Medrano 60', 'Zapotlanejo', 'Otra')),
+  carrier TEXT NOT NULL DEFAULT 'Otra'
+    CHECK (carrier IN ('Paquetexpress', 'Coordinadora', 'Estafeta', 'FedEx', 'Skydropx', 'Otra')),
+  status TEXT NOT NULL DEFAULT 'nuevo'
+    CHECK (status IN ('nuevo', 'activo', 'inactivo')),
+  total_purchased NUMERIC(12,2) NOT NULL DEFAULT 0,
+  last_purchase_date DATE,
+  last_purchase_description TEXT,
+  last_purchase_amount NUMERIC(12,2),
+  last_message_text TEXT,
+  last_message_date DATE,
+  next_followup_date DATE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE crm_messages (
+  id SERIAL PRIMARY KEY,
+  client_id INTEGER NOT NULL REFERENCES crm_clients(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  text TEXT NOT NULL,
+  channel TEXT NOT NULL DEFAULT 'WhatsApp'
+    CHECK (channel IN ('WhatsApp', 'llamada', 'otro')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE crm_purchases (
+  id SERIAL PRIMARY KEY,
+  client_id INTEGER NOT NULL REFERENCES crm_clients(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  description TEXT NOT NULL,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE INDEX idx_crm_clients_name ON crm_clients(name);
+CREATE INDEX idx_crm_clients_phone ON crm_clients(phone);
+CREATE INDEX idx_crm_clients_followup ON crm_clients(next_followup_date);
+CREATE INDEX idx_crm_messages_client ON crm_messages(client_id);
+CREATE INDEX idx_crm_purchases_client ON crm_purchases(client_id);
+INSERT INTO crm_clients (name, phone, branch, carrier, status)
+VALUES ('Cliente Viejo', '3300000000', 'Medrano 58', 'Paquetexpress', 'activo');
+`;
+  const db = newDb();
+  const { Pool } = db.adapters.createPg();
+  const pool = new Pool();
+  await pool.query(V1_TABLES);
+
+  const columns = async () => {
+    const r = await pool.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'crm_clients' AND column_name IN ('carrier_other', 'city')"
+    );
+    return r.rows.map((x) => x.column_name);
+  };
+  check('v1: antes de ensureSchema faltan carrier_other y city', (await columns()).length === 0);
+
+  // En pg-mem, ensureSchema sobre una base v1 lanza un error propio de
+  // pg-mem en el CREATE TABLE IF NOT EXISTS (la tabla ya existe); en
+  // Postgres real esa sentencia es un no-op y no falla. Lo que se verifica
+  // es el resultado: las columnas quedan agregadas aunque schema.sql
+  // falle a medias, porque la migración corre ANTES que schema.sql.
+  try {
+    await ensureSchema(pool);
+  } catch (err) {
+    console.log(`  (ensureSchema lanzó en pg-mem, se tolera: ${String(err.message).split('\n')[0].slice(0, 120)})`);
+  }
+  const cols = await columns();
+  check('v1: tras ensureSchema existen carrier_other y city', cols.includes('carrier_other') && cols.includes('city'), cols.join(','));
+  const old = await pool.query('SELECT COUNT(*)::int AS c FROM crm_clients WHERE name = $1', ['Cliente Viejo']);
+  check('v1: el cliente guardado con el esquema viejo sigue ahí', old.rows[0].c === 1);
+
+  // El caso exacto que fallaba en vivo: guardar un cliente nuevo.
+  const app = createApp(pool);
+  const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  async function req(path, opts = {}) {
+    const res = await fetch(base + path, {
+      ...opts,
+      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* texto plano */ }
+    return { status: res.status, json, text };
+  }
+  try {
+    let r = await req('/api/clients', { method: 'POST', headers: { 'x-branch': 'Medrano 58' }, body: { name: 'Clara Esthela', phone: '331767 8012', branch: 'Medrano 58', carrier: 'Paquetexpress' } });
+    check('v1: POST /api/clients (Clara Esthela) -> 201', r.status === 201 && r.json?.client?.name === 'Clara Esthela', JSON.stringify(r.json));
+    r = await req('/api/clients?search=clara', { headers: { 'x-branch': 'Medrano 58' } });
+    check('v1: GET /api/clients?search=clara -> 200 y la encuentra', r.status === 200 && r.json?.clients?.length === 1 && r.json.clients[0].name === 'Clara Esthela', JSON.stringify(r.json));
+    // Idempotencia: correr ensureSchema otra vez no rompe nada.
+    try { await ensureSchema(pool); } catch { /* mismo error propio de pg-mem, se tolera */ }
+    const cols2 = await columns();
+    check('v1: segundo ensureSchema deja las columnas y no borra datos', cols2.includes('carrier_other') && cols2.includes('city'), cols2.join(','));
+    r = await req('/api/clients', { method: 'POST', headers: { 'x-branch': 'Zapotlanejo' }, body: { name: 'Boutique Rosa', phone: '3344445555', branch: 'Zapotlanejo', carrier: 'Estafeta', city: 'Guadalajara' } });
+    check('v1: tras segundo ensureSchema, POST con ciudad -> 201', r.status === 201 && r.json?.client?.city === 'Guadalajara', JSON.stringify(r.json));
+  } finally {
+    server.close();
+    await pool.end().catch(() => {});
+  }
+}
+
 async function main() {
   console.log('Smoke test — CRM Mayoreo (pg-mem, sin base real)');
   const db = newDb();
@@ -227,6 +348,9 @@ async function main() {
     check('Lista tras borrar (Medrano 58) -> 0 clientes', r.json?.clients?.length === 0, JSON.stringify(r.json));
     r = await req(`/api/clients/${lunaId}`, { method: 'DELETE', headers: H58 });
     check('DELETE cliente inexistente -> 404', r.status === 404, JSON.stringify(r.json));
+
+    // 13. Migración desde esquema v1 (regresión del 500 al guardar).
+    await testV1Migration();
   } finally {
     server.close();
     await pool.end().catch(() => {});
