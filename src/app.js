@@ -22,6 +22,57 @@ const CARRIERS = ['Paquetexpress', 'Coordinadora', 'Estafeta', 'FedEx', 'Skydrop
 const STATUSES = ['nuevo', 'activo', 'inactivo'];
 const CHANNELS = ['WhatsApp', 'llamada', 'otro'];
 
+// Niveles de cliente (aprobados por Ulises 2026-11-25). Se calculan solos
+// a partir del historial de compras de los últimos 365 días:
+// M12 = monto comprado en los últimos 365 días; P12 = número de compras
+// en los últimos 365 días; primera compra = fecha de su primera compra.
+// Orden de evaluación (el primero que coincida gana): Top, Constante,
+// Esporádico, Nuevo, Ocasional.
+const LEVELS = ['top', 'constante', 'esporadico', 'ocasional', 'nuevo'];
+const LEVEL_LABELS = { top: 'Top', constante: 'Constante', esporadico: 'Esporádico', ocasional: 'Ocasional', nuevo: 'Nuevo' };
+const LEVEL_TOP_MIN_M12 = 100000;      // Top: $100,000+ en los últimos 365 días
+const LEVEL_CONSTANTE_MIN_P12 = 6;      // Constante: 6+ compras en los últimos 365 días
+const LEVEL_NUEVO_MAX_DAYS = 90;        // Nuevo: primera compra hace 90 días o menos
+
+function computeLevel({ m12, p12, firstPurchase }) {
+  if (m12 >= LEVEL_TOP_MIN_M12) return 'top';
+  if (p12 >= LEVEL_CONSTANTE_MIN_P12) return 'constante';
+  if (p12 >= 2 && p12 <= 3) return 'esporadico';
+  if (!firstPurchase) return 'nuevo';
+  const first = new Date(`${firstPurchase}T12:00:00Z`);
+  const today = new Date(`${mexicoToday()}T12:00:00Z`);
+  const days = Math.floor((today - first) / 86400000);
+  if (days <= LEVEL_NUEVO_MAX_DAYS) return 'nuevo';
+  return 'ocasional';
+}
+
+// Nivel efectivo de un cliente: si tiene nivel fijado a mano
+// (level_override), ese manda; si no, el calculado de su historial.
+function effectiveLevel(r) {
+  if (r.level_override && LEVELS.includes(r.level_override)) return r.level_override;
+  return computeLevel({
+    m12: money(r.m12),
+    p12: parseInt(r.p12, 10) || 0,
+    firstPurchase: toISODate(r.first_purchase),
+  });
+}
+
+// Agregados de compras por cliente en una sola consulta (LEFT JOIN con
+// subconsulta sobre crm_purchases): M12, P12 y primera compra. `param` es
+// el placeholder ($N) de la fecha de inicio de la ventana (YYYY-MM-DD).
+// Se usa CASE (no FILTER) porque pg-mem ignora el FILTER de los agregados;
+// el parámetro de fecha sí se resuelve dentro del CASE.
+function levelAggJoin(param) {
+  return `LEFT JOIN (
+    SELECT client_id,
+      COALESCE(SUM(CASE WHEN date >= ${param} THEN amount ELSE 0 END), 0) AS m12,
+      COALESCE(SUM(CASE WHEN date >= ${param} THEN 1 ELSE 0 END), 0) AS p12,
+      MIN(date) AS first_purchase
+    FROM crm_purchases GROUP BY client_id
+  ) agg ON agg.client_id = c.id`;
+}
+const CLIENT_LEVEL_COLUMNS = 'c.*, COALESCE(agg.m12, 0) AS m12, COALESCE(agg.p12, 0) AS p12, agg.first_purchase';
+
 // Normaliza un valor DATE de pg (Date o 'YYYY-MM-DD...') a 'YYYY-MM-DD'.
 function toISODate(v) {
   if (!v) return null;
@@ -76,26 +127,43 @@ function createApp(pool) {
   app.use(express.json({ limit: '1mb' }));
 
   // ---- Normalizadores de filas ----
-  const normClient = (r) => ({
-    ...r,
-    // Paquetería a mostrar: si es 'Otra', el nombre libre que se escribió.
-    carrier_display: r.carrier === 'Otra' && r.carrier_other ? r.carrier_other : r.carrier,
-    total_purchased: money(r.total_purchased),
-    last_purchase_amount: r.last_purchase_amount == null ? null : money(r.last_purchase_amount),
-    last_purchase_date: toISODate(r.last_purchase_date),
-    last_message_date: toISODate(r.last_message_date),
-    next_followup_date: toISODate(r.next_followup_date),
-    created_at: toISODateTime(r.created_at),
-    updated_at: toISODateTime(r.updated_at),
-    whatsapp_url: waLink(r.phone),
-  });
+  // La fila trae los agregados de nivel (m12, p12, first_purchase) que se
+  // calculan con el LEFT JOIN; no se devuelven tal cual: solo se usan para
+  // calcular `level` (efectivo) y se quitan de la respuesta. Si una fila
+  // no trae los agregados (no debería pasar: todas las lecturas usan el
+  // JOIN), el nivel cae en 'nuevo' por defecto.
+  const normClient = (r) => {
+    const level = effectiveLevel(r);
+    const { m12, p12, first_purchase, ...rest } = r;
+    return {
+      ...rest,
+      level,
+      level_override: r.level_override || null,
+      // Paquetería a mostrar: si es 'Otra', el nombre libre que se escribió.
+      carrier_display: r.carrier === 'Otra' && r.carrier_other ? r.carrier_other : r.carrier,
+      total_purchased: money(r.total_purchased),
+      last_purchase_amount: r.last_purchase_amount == null ? null : money(r.last_purchase_amount),
+      last_purchase_date: toISODate(r.last_purchase_date),
+      last_message_date: toISODate(r.last_message_date),
+      next_followup_date: toISODate(r.next_followup_date),
+      created_at: toISODateTime(r.created_at),
+      updated_at: toISODateTime(r.updated_at),
+      whatsapp_url: waLink(r.phone),
+    };
+  };
   const normMessage = (r) => ({ ...r, date: toISODate(r.date), created_at: toISODateTime(r.created_at) });
   const normPurchase = (r) => ({
     ...r, date: toISODate(r.date), amount: money(r.amount), created_at: toISODateTime(r.created_at),
   });
 
   async function getClient(id) {
-    const r = await pool.query('SELECT * FROM crm_clients WHERE id = $1', [id]);
+    const windowStart = addDaysISO(mexicoToday(), -365);
+    const r = await pool.query(
+      `SELECT ${CLIENT_LEVEL_COLUMNS} FROM crm_clients c
+       ${levelAggJoin('$2')}
+       WHERE c.id = $1`,
+      [id, windowStart]
+    );
     return r.rows[0] ? normClient(r.rows[0]) : null;
   }
 
@@ -175,19 +243,26 @@ function createApp(pool) {
   });
 
   // ================= Clientes =================
-  // GET /api/clients?search=&branch=&carrier=&status=
+  // GET /api/clients?search=&branch=&carrier=&status=&level=
   // search: por nombre, teléfono o ciudad. Filtros exactos por sucursal,
   // paquetería y estado. Alcance obligatorio (encabezado x-branch con la
   // sucursal, o x-admin-pin para el administrador): sin alcance -> 400.
   // Sin ser administrador, la lista siempre es la de la sucursal propia
   // (el parámetro branch se ignora); el administrador puede filtrar por
   // cualquier sucursal, incluida 'Otra'.
+  // level: filtra por nivel efectivo (top/constante/esporadico/ocasional/
+  // nuevo). El nivel se calcula de los agregados, así que el filtro se
+  // aplica en JS sobre la lista ya filtrada (igual que el filtro por fecha
+  // de /api/followups).
   app.get('/api/clients', async (req, res, next) => {
     try {
       const scope = await resolveScope(req, res);
       if (scope === undefined) return; // 401 ya respondido
       if (!scope) {
         return res.status(400).json({ ok: false, error: 'Falta la sucursal. Elige tu sucursal para ver sus clientes.' });
+      }
+      if (req.query.level && !LEVELS.includes(req.query.level)) {
+        return res.status(400).json({ ok: false, error: 'Nivel no válido.' });
       }
       const conditions = [];
       const vals = [];
@@ -231,11 +306,15 @@ function createApp(pool) {
         i += 1;
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const windowStart = addDaysISO(mexicoToday(), -365);
+      vals.push(windowStart);
       const r = await pool.query(
-        `SELECT * FROM crm_clients ${where} ORDER BY name ASC`,
+        `SELECT ${CLIENT_LEVEL_COLUMNS} FROM crm_clients c ${levelAggJoin(`$${vals.length}`)} ${where} ORDER BY c.name ASC`,
         vals
       );
-      return res.json({ ok: true, clients: r.rows.map(normClient) });
+      let clients = r.rows.map(normClient);
+      if (req.query.level) clients = clients.filter((c) => c.level === req.query.level);
+      return res.json({ ok: true, clients });
     } catch (err) { next(err); }
   });
 
@@ -273,7 +352,10 @@ function createApp(pool) {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
         [name, phone, branch, carrier, carrierOther, city, status, nextFollowup, b.notes || null]
       );
-      return res.status(201).json({ ok: true, client: normClient(r.rows[0]) });
+      // Se relee con getClient para devolver el nivel calculado (nuevo,
+      // sin compras) en vez de la fila cruda del INSERT.
+      const created = await getClient(r.rows[0].id);
+      return res.status(201).json({ ok: true, client: created });
     } catch (err) { next(err); }
   });
 
@@ -310,7 +392,7 @@ function createApp(pool) {
   // Solo se edita si el cliente pertenece al alcance. Cambiar la sucursal
   // mueve al cliente a la vista de la otra sucursal; cambiar la paquetería
   // a 'Otra' exige carrier_other, y al salir de 'Otra' se limpia.
-  const CLIENT_FIELDS = ['name', 'phone', 'branch', 'carrier', 'carrier_other', 'city', 'status', 'next_followup_date', 'notes'];
+  const CLIENT_FIELDS = ['name', 'phone', 'branch', 'carrier', 'carrier_other', 'city', 'status', 'next_followup_date', 'notes', 'level_override'];
   app.put('/api/clients/:id', async (req, res, next) => {
     try {
       const id = parseClientId(req, res);
@@ -363,6 +445,14 @@ function createApp(pool) {
           }
         }
         if (f === 'notes' && v === '') v = null;
+        // Nivel fijado a mano: '' o null = Automático (se limpia el
+        // override y vuelve a mandar el calculado); si no, uno de los 5.
+        if (f === 'level_override') {
+          if (v === '' || v === null) v = null;
+          else if (!LEVELS.includes(v)) {
+            return res.status(400).json({ ok: false, error: 'Nivel no válido.' });
+          }
+        }
         sets.push(`${f} = $${i}`);
         vals.push(v);
         i += 1;
@@ -381,7 +471,10 @@ function createApp(pool) {
         `UPDATE crm_clients SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
         vals
       );
-      return res.json({ ok: true, client: normClient(r.rows[0]) });
+      // Se relee con getClient para devolver el nivel efectivo actualizado
+      // (el override, si se fijó, o el calculado).
+      const updated = await getClient(r.rows[0].id);
+      return res.json({ ok: true, client: updated });
     } catch (err) { next(err); }
   });
 
@@ -515,10 +608,13 @@ function createApp(pool) {
         vals.push(branchFilter);
         where += ` AND branch = $${vals.length}`;
       }
+      const windowStart = addDaysISO(today, -365);
+      vals.push(windowStart);
       const r = await pool.query(
-        `SELECT * FROM crm_clients
+        `SELECT ${CLIENT_LEVEL_COLUMNS} FROM crm_clients c
+         ${levelAggJoin(`$${vals.length}`)}
          ${where}
-         ORDER BY next_followup_date ASC, name ASC`,
+         ORDER BY c.next_followup_date ASC, c.name ASC`,
         vals
       );
       const followups = r.rows
@@ -543,4 +639,4 @@ function createApp(pool) {
   return app;
 }
 
-module.exports = { createApp, mexicoToday, waLink, BRANCHES, REAL_BRANCHES, CARRIERS, STATUSES, CHANNELS };
+module.exports = { createApp, mexicoToday, waLink, BRANCHES, REAL_BRANCHES, CARRIERS, STATUSES, CHANNELS, LEVELS, LEVEL_LABELS };
